@@ -152,19 +152,36 @@
     {label:'Mars Rhino Beetle',type:'smash',inputs:['black_lotus','sunset_moth','sabertooth_longhorn'],notes:'Black Lotus + Sunset Moth + Sabertooth.'},
     {label:'Hercules Beetle',type:'smash',inputs:['golden_scarab','pollen_adamantine','purple'],notes:'Golden Scarab + Adamantine Pollen + Purple.'}
   ];
+  // Value scores from mathematical model (see beetleboy_value_model.md)
+  // Based on: base cost, craft depth, collection value, crafting utility
   const RECIPE_VALUE = {
-    'Hercules Beetle':100,'Mars Rhino Beetle':95,'Diamond Hammer':95,'Black Lotus':90,
-    'Adamantine Hammer':85,'Sabertooth Longhorn Beetle':80,'Sunset Moth':80,
-    'Mithril Hammer':75,'Giraffe Weevil':70,'Pillbug':70,'Imperial Tortoise Beetle':70,
-    'Bronze Hammer':65,'Goliath Beetle':60,'Goliath Beetle (alt)':60,'Stag Beetle':60,
-    'Bombardier Beetle':55,'Bombardier Beetle (alt)':55,'Tin Hammer':55,
-    'Giraffe Weevil (alt)':70,'Pillbug (alt)':70,'Imperial Tortoise Beetle (alt)':70,
-    'Sabertooth Longhorn (Stag)':80,'Sabertooth Longhorn (Bomb)':80,
-    'Sunset Moth (Stag)':80,'Sunset Moth (Bomb)':80,
-    'Pond Beetle':50,'Monarch':50,'Monarch (alt)':50,
-    'Pinecone / Moss / Gunpowder Bridge':45,'Nectar / Cattail Bridge':40,
-    'Adamantine Pollen':35,'Mithril Pollen':30,'Bronze Pollen':25,'Tin Pollen':20,
-    'Junk Tesseract':10,'Junk Cube':1
+    // Tier 10 — Legendary
+    'Hercules Beetle':100,'Mars Rhino Beetle':95,
+    // Tier 9 — Endgame
+    'Black Lotus':88,'Diamond Hammer':82,
+    // Tier 8 — Epic
+    'Sabertooth Longhorn Beetle':78,'Sunset Moth':78,
+    'Sabertooth Longhorn (Stag)':78,'Sabertooth Longhorn (Bomb)':78,
+    'Sunset Moth (Stag)':78,'Sunset Moth (Bomb)':78,
+    'Adamantine Pollen':75,
+    // Tier 7 — Adamantine
+    'Adamantine Hammer':65,
+    'Goliath Beetle':60,'Goliath Beetle (alt)':60,'Stag Beetle':60,
+    'Bombardier Beetle':55,'Bombardier Beetle (alt)':55,
+    // Tier 5-6 — Rare + Artifacts
+    'Giraffe Weevil':55,'Giraffe Weevil (alt)':55,
+    'Pillbug':55,'Pillbug (alt)':55,
+    'Imperial Tortoise Beetle':55,'Imperial Tortoise Beetle (alt)':55,
+    'Pinecone / Moss / Gunpowder Bridge':50,'Nectar / Cattail Bridge':40,
+    'Mithril Pollen':40,
+    // Tier 4 — Mithril
+    'Mithril Hammer':30,'Pond Beetle':25,'Monarch':25,'Monarch (alt)':25,
+    // Tier 3 — Bronze Bridge
+    'Bronze Hammer':15,'Bronze Pollen':12,
+    // Tier 2 — Compression
+    'Junk Tesseract':8,'Tin Hammer':6,
+    // Tier 1 — Base crafts
+    'Tin Pollen':5,'Junk Cube':1
   };
 
   /* ─── Progression Stages ─── */
