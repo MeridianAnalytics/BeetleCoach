@@ -1,5 +1,5 @@
 # BeetleBoy / BeetleCraft Knowledge Base
-_Last updated: 2026-04-07 (v10.3 — see beetle_known_recipes_human_readable.md for latest)_
+_Last updated: 2026-04-07 (v11.5.0 — see beetle_known_recipes_human_readable.md for latest)_
 
 This document is a durable handoff/reference file for future AI conversations about the RemiliaNET BeetleBoy / BeetleCraft game.
 
@@ -33,7 +33,7 @@ The game appears to have two important crafting modes:
 ### Smash
 - probabilistic / RNG-weighted
 - used for:
-  - many pollen/flower/beetle conversions
+  - many flower/beetle conversions
   - artifact generation
   - tier-up attempts
   - most interesting/endgame beetle crafts
@@ -201,6 +201,8 @@ These are treated as the safest known recipes.
   - Milk Thistle + Junk Cube
 
 ## 6. Known pollen recipes
+
+Pollen recipes are deterministic assemble recipes, not smash.
 
 ### Tin Pollen
 - Any 2 same-tier common/Tin flowers

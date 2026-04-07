@@ -1,11 +1,11 @@
 # BeetleBoy / BeetleCraft — Mathematical Value Model
-_Last updated: 2026-04-07 (v10.3 — live hammer break%, strategy toggle, flower transmutation)_
+_Last updated: 2026-04-07 (v11.5.0 — live hammer break%, strategy toggle, flower transmutation)_
 
 ## Methodology
 
 **Base cost unit**: 1 farmable item from a catch (Green Beetle, Ladybug, Purple Beetle, any junk item, any Tin flower). Each catch yields 1 beetle + 1 junk + XP.
 
-**RNG tax**: Smash recipes are probabilistic. Standard smash = 1.5x multiplier, endgame smash = 2.0x multiplier to account for expected failures.
+**RNG tax**: Smash recipes are probabilistic. Standard smash = 1.5x multiplier, endgame smash = 2.0x multiplier to account for expected failures. Pollen recipes are deterministic assemble and are not taxed.
 
 **Coupon collector tax**: Bridge recipes that produce 1-of-N random outputs (Nectar OR Cattail, Pinecone OR Moss OR Gunpowder) require additional attempts to get a specific output.
 
@@ -31,7 +31,7 @@ _Last updated: 2026-04-07 (v10.3 — live hammer break%, strategy toggle, flower
 | Item | Base Cost | Score | Category | Notes |
 |------|-----------|-------|----------|-------|
 | Junk Cube | 2 | 3 | junk | 2 junk. Versatile: hammers, transmutation, keys |
-| Tin Pollen | 3 | 5 | pollen | 2 Tin flowers x1.5 RNG. Bronze Hammer input |
+| Tin Pollen | 3 | 5 | pollen | 2 Tin flowers. Assemble. Bronze Hammer input |
 | BeetleBoy Key | 5 | 4 | utility | Bronze flower + Junk Cube. One-time need |
 
 ### Tier 1.5 — Bronze Flowers (Depth 2, Cost ~4.5)
@@ -47,7 +47,7 @@ _Last updated: 2026-04-07 (v10.3 — live hammer break%, strategy toggle, flower
 | Item | Base Cost | Score | Category | Notes |
 |------|-----------|-------|----------|-------|
 | Junk Tesseract | 6 | 8 | junk | 3 Junk Cubes. Every hammer upgrade needs one |
-| Bronze Pollen | 13.5 | 12 | pollen | 2 Bronze flowers x1.5 RNG. Gateway to artifacts |
+| Bronze Pollen | 13.5 | 12 | pollen | 2 Bronze flowers. Assemble. Gateway to artifacts |
 | Tin Hammer | 4 | 6 | utility | 2 Junk Cubes. +0% bonus, 10% break |
 
 ### Tier 3 — Bronze Bridge Artifacts (Depth 4, Cost ~22)
@@ -77,7 +77,7 @@ _Last updated: 2026-04-07 (v10.3 — live hammer break%, strategy toggle, flower
 
 | Item | Base Cost | Score | Category | Notes |
 |------|-----------|-------|----------|-------|
-| Mithril Pollen | 120 | 40 | pollen | 2 Mithril flowers. Opens artifact pipeline |
+| Mithril Pollen | 120 | 40 | pollen | 2 Mithril flowers. Assemble. Opens artifact pipeline |
 | Mithril Hammer | 33 | 30 | utility | +20% bonus, 10% break |
 
 ### Tier 5 — Rare Beetles (Depth 6, Cost ~113)
@@ -116,7 +116,7 @@ _Last updated: 2026-04-07 (v10.3 — live hammer break%, strategy toggle, flower
 
 | Item | Base Cost | Score | Category | Notes |
 |------|-----------|-------|----------|-------|
-| Adamantine Pollen | 1230 | 75 | pollen | 2 Adamantine flowers. Diamond Hammer + Hercules |
+| Adamantine Pollen | 1230 | 75 | pollen | 2 Adamantine flowers. Assemble. Diamond Hammer + Hercules |
 
 ### Tier 8 — Epic Beetles (Depth 8-10, Cost ~1220)
 

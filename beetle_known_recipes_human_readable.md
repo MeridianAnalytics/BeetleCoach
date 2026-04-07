@@ -438,31 +438,6 @@ Note: Christmas Beetle is a special seasonal beetle.
 
 ---
 
-## 17b. XP and Leveling system
-
-### XP sources (observed from chat log)
-- Beetle claims and hunts award XP based on catch rarity:
-  - Green Beetle + junk: ~10-25 XP
-  - Ladybug/Purple + flower: ~20-30 XP
-  - Mithril+ beetles: ~50-120 XP
-  - Adamantine+ beetles: ~100-150+ XP
-  - Higher rarity items in the catch = more XP
-
-### XP observations
-- XP appears to be sum of rarity values of all items in a catch
-- Catches include: 1 beetle + 1-2 junk/flower items
-- Higher-tier catches give significantly more XP
-- Level 10 required for global chat access
-- Current max observed levels in community: ~100+
-
-### Leveling strategy
-- Hunting gives more frequent XP than free claims (but costs 20 cheese)
-- Higher-tier beetle drops give more XP per catch
-- Consistent claiming + hunting is the XP engine
-- The script tracks session XP and detects level-ups automatically
-
----
-
 ## 18. Game timer mechanics
 
 ### Beetle Claim
@@ -521,8 +496,7 @@ GitHub: https://github.com/MeridianAnalytics/BeetleCoach
 - Auto-claim daily cheese
 - Smart navigation: auto-navigates to beetle cartridge when claim/hunt ready
 - Post-action hybrid refresh: immediate passiveScan + delayed fullScan 30s later
-- Strategy toggle: Endgame (Mars Rhino path) / Broad (collect everything) / Flowers (pollen pipeline)
-- XP tracking from chat log, level-up detection and logging
+- Strategy toggle: Endgame (Mars Rhino path) or Broad (collect everything)
 
 ### Scanning
 - Layered item extraction: background-image → img src → alt/title

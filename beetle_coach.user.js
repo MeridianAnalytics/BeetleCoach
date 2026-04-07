@@ -97,6 +97,7 @@
   const ADAMANTINE_FLOWERS = ['pincushion','gazania'];
   const BRONZE_BEETLES = ['ladybug','purple'];
   const MITHRIL_BEETLES = ['pond','monarch'];
+  const ADAMANTINE_BEETLES = ['goliath','stag','bombardier'];
   const ANY_JUNK = [
     'coffee_can','red_whistle','cracker_wrapper','stamp','marble','bottle_cap',
     'ramune_bottle','wine_cork','green_army_man','scratch_off','cigarette_butt',
@@ -158,7 +159,8 @@
   const TOKEN_GROUPS = {
     any_junk:ANY_JUNK, any_tin_flower:TIN_FLOWERS, any_bronze_flower:BRONZE_FLOWERS,
     any_mithril_flower:MITHRIL_FLOWERS, any_adamantine_flower:ADAMANTINE_FLOWERS,
-    any_bronze_beetle:BRONZE_BEETLES, any_mithril_beetle:MITHRIL_BEETLES
+    any_bronze_beetle:BRONZE_BEETLES, any_mithril_beetle:MITHRIL_BEETLES,
+    any_adamantine_beetle:ADAMANTINE_BEETLES
   };
 
   /* ─── Recipes ─── */
@@ -201,7 +203,8 @@
     {label:'Hercules Beetle',type:'smash',inputs:['golden_scarab','pollen_adamantine','purple'],notes:'Golden Scarab + Adamantine Pollen + Purple.'},
     // Flower transmutation (Green + same-tier beetle + Junk Cube -> flower of that tier)
     {label:'Bronze Flower Transmute',type:'smash',inputs:['green','purple','junk_cube_t1'],notes:'Green + Purple + Junk Cube -> Bronze flower (RNG).'},
-    {label:'Mithril Flower Transmute',type:'smash',inputs:['green','any_mithril_beetle','junk_cube_t1'],notes:'Green + Mithril beetle + Junk Cube -> Mithril flower (RNG). Costly!'}
+    {label:'Mithril Flower Transmute',type:'smash',inputs:['green','any_mithril_beetle','junk_cube_t1'],notes:'Green + Mithril beetle + Junk Cube -> Mithril flower (RNG). Costly!'},
+    {label:'Adamantine Flower Transmute',type:'smash',inputs:['green','any_adamantine_beetle','junk_cube_t1'],notes:'Green + Adamantine beetle + Junk Cube -> Adamantine flower (RNG).'}
   ];
   const RECIPE_VALUE = {
     'Hercules Beetle':100,'Mars Rhino Beetle':95,'Black Lotus':88,'Diamond Hammer':82,
@@ -214,6 +217,7 @@
     'Pinecone / Moss / Gunpowder Bridge':50,'Nectar / Cattail Bridge':40,'Mithril Pollen':40,
     'Mithril Hammer':30,'Pond Beetle':25,'Monarch':25,'Monarch (alt)':25,
     'Bronze Hammer':15,'Bronze Pollen':12,'Bronze Flower Transmute':10,'Mithril Flower Transmute':35,
+    'Adamantine Flower Transmute':55,
     'Junk Tesseract':8,'Tin Hammer':6,'Tin Pollen':5,'Junk Cube':1
   };
 
@@ -267,6 +271,7 @@
       timers:{},lastFullScan:0,lastPassiveScan:0,autoClaim:true,autoHunt:false,panelOpen:true,level:null,craftMode:null,
       strategy:'endgame', // 'endgame' | 'broad' | 'flowers'
       log:[],
+      stuckSince:0,stuckRefreshCount:0,
       session:{claims:0,hunts:0,cheeseClaims:0,cheeseGained:0,gains:[],totalXP:0,startTime:Date.now()}};
   }
   function load() {
@@ -287,6 +292,10 @@
       var oldMajor = (p.ver || '0').split('.')[0];
       var newMajor = CURRENT_VER.split('.')[0];
       if (oldMajor !== newMajor) { p.mergedInventory = {}; p.log = []; }
+      if (p.stuckSince && Date.now() - p.stuckSince > 300000) {
+        p.stuckSince = 0;
+        p.stuckRefreshCount = 0;
+      }
       p.ver = CURRENT_VER;
       return p;
     } catch(e) { return defaults(); }
@@ -376,10 +385,15 @@
   }
   function dn(k) { return LABELS[k] || k; }
   function cnt(inv, arr) { return arr.reduce(function(s,k) { return s + (inv[k]||0); }, 0); }
+  function tokenCount(inv, token) {
+    var group = TOKEN_GROUPS[token];
+    return group ? cnt(inv, group) : (inv[token]||0);
+  }
   function tokHuman(t) {
     var m = {any_junk:'any junk',any_tin_flower:'Tin flowers x2',any_bronze_flower:'Bronze flower',
       any_mithril_flower:'Mithril flower',any_adamantine_flower:'Adamantine flower',
-      any_bronze_beetle:'Bronze beetle',any_mithril_beetle:'Mithril beetle'};
+      any_bronze_beetle:'Bronze beetle',any_mithril_beetle:'Mithril beetle',
+      any_adamantine_beetle:'Adamantine beetle'};
     return m[t] || dn(t);
   }
   function canMake(r, inv) {
@@ -491,7 +505,8 @@
         seenFP2[fp2] = true;
         merge(page2);
       }
-      if (Object.keys(merged).length > 0) {
+      var scanSucceeded = Object.keys(merged).length > 0;
+      if (scanSucceeded) {
         S.mergedInventory = merged;
         var changes = [];
         for (var k in merged) {
@@ -515,10 +530,15 @@
       } else {
         logEvent('Scan: no items found' + (_unresolvedCount ? ' (' + _unresolvedCount + ' unresolved)' : ''));
       }
+      if (scanSucceeded) {
+        S.lastFullScan = Date.now();
+        S.lastPassiveScan = Date.now();
+        logInventorySnapshot();
+      }
     } finally { _scanning = false; }
     parseTimers(); parseHammer(); parseLevel(); parseCraftMode();
-    S.lastFullScan = Date.now(); S.lastPassiveScan = Date.now(); save();
-    logInventorySnapshot(); renderPanel();
+    save();
+    renderPanel();
   }
 
   /* ─── Passive inventory refresh (no pagination, visibility-gated) ─── */
@@ -693,18 +713,17 @@
     }
     // Parse XP from chat — track post count to avoid double-counting
     var posts = document.querySelectorAll('.postBody');
-    var xpPostCount = 0;
-    var latestXP = 0;
+    var xpValues = [];
     posts.forEach(function(p) {
       var text = p.textContent || '';
       var xpM = text.match(/\+(\d+)\s*XP/i);
-      if (xpM) { xpPostCount++; latestXP = parseInt(xpM[1]); }
+      if (xpM) { xpValues.push(parseInt(xpM[1], 10)); }
     });
     if (!S._xpPostsSeen) { S._xpPostsSeen = 0; }
-    if (xpPostCount > S._xpPostsSeen) {
+    if (xpValues.length > S._xpPostsSeen) {
       if (!S.session.totalXP) { S.session.totalXP = 0; }
-      S.session.totalXP += latestXP;
-      S._xpPostsSeen = xpPostCount;
+      S.session.totalXP += xpValues.slice(S._xpPostsSeen).reduce(function(sum, xp) { return sum + xp; }, 0);
+      S._xpPostsSeen = xpValues.length;
     }
   }
   function parseCraftMode() {
@@ -741,6 +760,21 @@
     'Bronze Flower Transmute','Mithril Flower Transmute'
   ]);
 
+  function createsMissingCollectible(recipe, inv) {
+    var outputKey = RECIPE_OUTPUT[recipe.label];
+    if (outputKey && COLLECTIBLES.has(outputKey) && !(inv[outputKey]||0)) { return true; }
+    if (recipe.label === 'Bronze Flower Transmute') {
+      return BRONZE_FLOWERS.some(function(k) { return !(inv[k]||0); });
+    }
+    if (recipe.label === 'Mithril Flower Transmute') {
+      return MITHRIL_FLOWERS.some(function(k) { return !(inv[k]||0); });
+    }
+    if (recipe.label === 'Adamantine Flower Transmute') {
+      return ADAMANTINE_FLOWERS.some(function(k) { return !(inv[k]||0); });
+    }
+    return false;
+  }
+
   function wouldConsumeLastCollectible(recipe, inv) {
     // In Flowers mode, allow pollen/transmute recipes to consume singleton flowers
     // That's the explicit purpose of Flowers strategy
@@ -748,6 +782,8 @@
       return false; // Let it through
     }
 
+    var outputKey = RECIPE_OUTPUT[recipe.label] || null;
+    var canSpendForNewCollectible = createsMissingCollectible(recipe, inv);
     for (var i = 0; i < recipe.inputs.length; i++) {
       var token = recipe.inputs[i];
       var group = TOKEN_GROUPS[token];
@@ -758,13 +794,13 @@
             for (var ai = 0; ai < group.length; ai++) {
               if (ai !== gi && (inv[group[ai]]||0) > 1) { hasAlt = true; break; }
             }
-            if (!hasAlt) { return true; }
+            if (!hasAlt && !(canSpendForNewCollectible && !isProtectedForGoal(group[gi], inv, outputKey))) { return true; }
           }
         }
       } else if (COLLECTIBLES.has(token) && (inv[token]||0) <= 1) {
-        return true;
+        if (!(canSpendForNewCollectible && !isProtectedForGoal(token, inv, outputKey))) { return true; }
       }
-      if (!group && isProtectedForGoal(token, inv)) { return true; }
+      if (!group && isProtectedForGoal(token, inv, outputKey)) { return true; }
     }
     return false;
   }
@@ -784,25 +820,29 @@
   // Items that are consumed as ingredients in higher recipes (need duplicates)
   var NEEDED_AS_INGREDIENT = new Set(['sabertooth_longhorn','sunset_moth','black_lotus']);
   // Protect one copy of endgame ingredients if higher goals are still missing
-  function isProtectedForGoal(key, inv) {
+  function isProtectedForGoal(key, inv, recipeOutputKey) {
     // Midgame: protect Pond/Monarch while Adamantine beetles still incomplete
     var needsAdamantine = !(inv['bombardier']||0) || !(inv['stag']||0) || !(inv['goliath']||0);
     if (needsAdamantine) {
+      if (recipeOutputKey === 'bombardier' || recipeOutputKey === 'stag' || recipeOutputKey === 'goliath') { return false; }
       if ((key === 'pond' || key === 'monarch') && (inv[key]||0) <= 2) {
         return true; // Keep at least 2 of each for progression recipes
       }
     }
     // Protect Mithril artifacts for Black Lotus path (needs all 3)
     if (!(inv['black_lotus']||0)) {
+      if (recipeOutputKey === 'black_lotus') { return false; }
       if ((key === 'pinecone' || key === 'moss' || key === 'gunpowder') && (inv[key]||0) <= 1) {
         return true;
       }
     }
     // Protect Adamantine flowers for Epic beetle path
     if (!(inv['sunset_moth']||0)) {
+      if (recipeOutputKey === 'sunset_moth') { return false; }
       if (key === 'gazania' && (inv[key]||0) <= 1) { return true; }
     }
     if (!(inv['sabertooth_longhorn']||0)) {
+      if (recipeOutputKey === 'sabertooth_longhorn') { return false; }
       if (key === 'pincushion' && (inv[key]||0) <= 1) { return true; }
     }
     // Note: Mithril Pollen is NOT protected here because consuming it
@@ -810,12 +850,14 @@
     // Protecting it creates a deadlock where the engine blocks its own progression.
     // Endgame: protect Mars Rhino ingredients
     if (!(inv['mars_rhino']||0)) {
+      if (recipeOutputKey === 'mars_rhino') { return false; }
       if ((key === 'black_lotus' || key === 'sunset_moth' || key === 'sabertooth_longhorn') && (inv[key]||0) <= 1) {
         return true;
       }
     }
     // Endgame: protect Hercules ingredients
     if (!(inv['hercules']||0)) {
+      if (recipeOutputKey === 'hercules') { return false; }
       if ((key === 'golden_scarab' || key === 'pollen_adamantine') && (inv[key]||0) <= 1) {
         return true;
       }
@@ -898,7 +940,7 @@
   // Focuses: Goliath -> Sunset Moth -> Black Lotus -> Mars Rhino -> Hercules
   var ENDGAME_CHAIN = [
     {key:'goliath',recipe:'Goliath Beetle',prereqs:['pinecone'],via:'Mithril Bridge for Pinecone'},
-    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','goliath'],via:'Need Gazania (transmute from Adamantine beetle)'},
+    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','any_adamantine_beetle'],via:'Need Gazania (transmute from any Adamantine beetle)'},
     {key:'black_lotus',recipe:'Black Lotus',prereqs:['gunpowder','moss','pinecone'],via:'Need ALL 3 Mithril artifacts (multiple bridge runs)'},
     {key:'mars_rhino',recipe:'Mars Rhino Beetle',prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'Black Lotus + Sunset Moth + Sabertooth'},
     {key:'hercules',recipe:'Hercules Beetle',prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab is drop-only (Diamond rarity)'}
@@ -914,12 +956,12 @@
     {key:'stag',recipe:'Stag Beetle',prereqs:['moss'],via:'Mithril Bridge (RNG) for Moss'},
     {key:'bombardier',recipe:'Bombardier Beetle',prereqs:['gunpowder'],via:'Mithril Bridge (RNG) for Gunpowder'},
     // Missing flowers
-    {key:'gazania',recipe:null,prereqs:['goliath'],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
-    {key:'pincushion',recipe:null,prereqs:['goliath'],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
+    {key:'gazania',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Transmute: Green + any Adamantine beetle + Junk Cube'},
+    {key:'pincushion',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Transmute: Green + any Adamantine beetle + Junk Cube'},
     {key:'black_lotus',recipe:'Black Lotus',prereqs:['gunpowder','moss','pinecone'],via:'All 3 Mithril artifacts'},
     // Epic beetles
-    {key:'sabertooth_longhorn',recipe:'Sabertooth Longhorn Beetle',prereqs:['pincushion','goliath'],via:'Pincushion + Adamantine beetle'},
-    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','goliath'],via:'Gazania + Adamantine beetle'},
+    {key:'sabertooth_longhorn',recipe:'Sabertooth Longhorn Beetle',prereqs:['pincushion','any_adamantine_beetle'],via:'Pincushion + any Adamantine beetle'},
+    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','any_adamantine_beetle'],via:'Gazania + any Adamantine beetle'},
     // Legendary
     {key:'mars_rhino',recipe:'Mars Rhino Beetle',prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'All 3 endgame pieces'},
     {key:'hercules',recipe:'Hercules Beetle',prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab (drop-only) + Adamantine Pollen'}
@@ -940,20 +982,32 @@
     {key:'moss',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG 1/3)'},
     {key:'gunpowder',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG 1/3)'},
     // Priority 5: Adamantine flowers
-    {key:'gazania',recipe:null,prereqs:['goliath'],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
-    {key:'pincushion',recipe:null,prereqs:['goliath'],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
+    {key:'gazania',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Transmute: Green + any Adamantine beetle + Junk Cube'},
+    {key:'pincushion',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Transmute: Green + any Adamantine beetle + Junk Cube'},
     // Priority 6: Adamantine Pollen
     {key:'pollen_adamantine',recipe:'Adamantine Pollen',prereqs:[],via:'Assemble Pincushion + Gazania'}
   ];
 
   // Find the NEXT progression goal and what concrete step advances it
   var PREREQ_RECIPES = {
-    'pinecone':'Pinecone / Moss / Gunpowder Bridge','moss':'Pinecone / Moss / Gunpowder Bridge',
-    'gunpowder':'Pinecone / Moss / Gunpowder Bridge',
-    'nectar':'Nectar / Cattail Bridge','cattail':'Nectar / Cattail Bridge',
-    'pollen_tin':'Tin Pollen','pollen_bronze':'Bronze Pollen',
-    'pollen_mithril':'Mithril Pollen','pollen_adamantine':'Adamantine Pollen'
+    'pinecone':['Pinecone / Moss / Gunpowder Bridge'],'moss':['Pinecone / Moss / Gunpowder Bridge'],
+    'gunpowder':['Pinecone / Moss / Gunpowder Bridge'],
+    'nectar':['Nectar / Cattail Bridge'],'cattail':['Nectar / Cattail Bridge'],
+    'pollen_tin':['Tin Pollen'],'pollen_bronze':['Bronze Pollen'],
+    'pollen_mithril':['Mithril Pollen'],'pollen_adamantine':['Adamantine Pollen'],
+    'gazania':['Adamantine Flower Transmute'],'pincushion':['Adamantine Flower Transmute'],
+    'any_adamantine_beetle':['Goliath Beetle','Goliath Beetle (alt)','Stag Beetle','Bombardier Beetle','Bombardier Beetle (alt)']
   };
+
+  function getGoalRecipes(goal) {
+    if (goal.key === 'gazania' || goal.key === 'pincushion') {
+      return RECIPES.filter(function(r) { return r.label === 'Adamantine Flower Transmute'; });
+    }
+    var byOutput = RECIPES.filter(function(r) { return RECIPE_OUTPUT[r.label] === goal.key; });
+    if (byOutput.length) { return byOutput; }
+    if (!goal.recipe) { return []; }
+    return RECIPES.filter(function(r) { return r.label === goal.recipe; });
+  }
 
   // Score all progression goals and return the best actionable one
   function getProgressionMove(inv) {
@@ -968,17 +1022,19 @@
 
       var missingPrereqs = [];
       for (var pi = 0; pi < goal.prereqs.length; pi++) {
-        if (!(inv[goal.prereqs[pi]]||0)) { missingPrereqs.push(goal.prereqs[pi]); }
+        if (tokenCount(inv, goal.prereqs[pi]) < 1) { missingPrereqs.push(goal.prereqs[pi]); }
       }
 
       var goalValue = RECIPE_VALUE[goal.recipe] || 30;
 
       // Can craft directly?
       if (missingPrereqs.length === 0 && goal.recipe) {
-        var directRecipe = RECIPES.find(function(r) { return r.label === goal.recipe; });
+        var directRecipe = getGoalRecipes(goal).find(function(r) {
+          return canMake(r, inv) && !wouldConsumeLastCollectible(r, inv);
+        });
         if (directRecipe && canMake(directRecipe, inv) && !wouldConsumeLastCollectible(directRecipe, inv)) {
           // Direct craft: highest priority (score = value + 100)
-          candidates.push({score: goalValue + 100, type:'direct', goal:goal.key, label:goal.recipe, reason:'Craft ' + dn(goal.key)});
+          candidates.push({score: goalValue + 100, type:'direct', goal:goal.key, label:directRecipe.label, reason:'Craft ' + dn(goal.key)});
           continue;
         }
       }
@@ -986,27 +1042,31 @@
       // Can craft a prereq?
       var foundPrereq = false;
       for (var mi = 0; mi < missingPrereqs.length; mi++) {
-        var prereqLabel = PREREQ_RECIPES[missingPrereqs[mi]];
-        if (!prereqLabel) { continue; }
-        var prereqRecipe = RECIPES.find(function(r) { return r.label === prereqLabel; });
-        if (prereqRecipe && canMake(prereqRecipe, inv) && !wouldConsumeLastCollectible(prereqRecipe, inv)) {
-          // Prereq craft: score = goal value + proximity bonus (fewer missing = closer)
-          var proximity = goal.prereqs.length - missingPrereqs.length;
-          candidates.push({
-            score: goalValue + (proximity * 10),
-            type:'prereq', goal:goal.key, label:prereqLabel,
-            reason:'For ' + dn(goal.key) + ': craft ' + prereqLabel,
-            target:goal.recipe, produces:missingPrereqs[mi]
-          });
-          foundPrereq = true;
-          break; // One prereq per goal is enough
+        var prereqLabels = PREREQ_RECIPES[missingPrereqs[mi]];
+        if (!prereqLabels) { continue; }
+        for (var pri = 0; pri < prereqLabels.length; pri++) {
+          var prereqRecipe = RECIPES.find(function(r) { return r.label === prereqLabels[pri]; });
+          if (prereqRecipe && canMake(prereqRecipe, inv) && !wouldConsumeLastCollectible(prereqRecipe, inv)) {
+            // Prereq craft: score = goal value + proximity bonus (fewer missing = closer)
+            var proximity = goal.prereqs.length - missingPrereqs.length;
+            candidates.push({
+              score: goalValue + (proximity * 10),
+              type:'prereq', goal:goal.key, label:prereqLabels[pri],
+              reason:'For ' + dn(goal.key) + ': craft ' + prereqLabels[pri],
+              target:dn(goal.key), produces:missingPrereqs[mi]
+            });
+            foundPrereq = true;
+            break; // One prereq per goal is enough
+          }
         }
+        if (foundPrereq) { break; }
       }
 
       // Blocked — remember the highest-value blocked goal
       if (!foundPrereq && !bestBlocked) {
         bestBlocked = {type:'blocked', goal:goal.key, label:goal.recipe,
-          reason:'Need: ' + missingPrereqs.map(dn).join(', '), via:goal.via};
+          reason:missingPrereqs.length ? ('Need: ' + missingPrereqs.map(tokHuman).join(', ')) : (goal.via || 'Need recipe inputs'),
+          via:goal.via};
       }
     }
 
@@ -1016,6 +1076,11 @@
       return candidates[0];
     }
     return bestBlocked;
+  }
+
+  function isGuaranteedOutput(label, token) {
+    if (!token) { return false; }
+    return RECIPE_OUTPUT[label] === token;
   }
 
   function getActionPlans(inv) {
@@ -1030,11 +1095,12 @@
       if (progRecipe) {
         var progValue = (RECIPE_VALUE[progMove.label]||5) + 20; // Boost progression moves
         if (progMove.type === 'prereq' && progMove.target) {
+          var prereqGuaranteed = isGuaranteedOutput(progMove.label, progMove.produces);
           // 2-step plan: prereq then goal
           plans.push({
             goal: dn(progMove.goal), value: progValue, type: '2-step', progression: true,
             steps: [
-              { label: progMove.label, inputs: progRecipe.inputs.map(tokHuman).join(' + '), ready: true, note: progRecipe.type === 'smash' ? 'RNG' : null, produces: progMove.produces },
+              { label: progMove.label, inputs: progRecipe.inputs.map(tokHuman).join(' + '), ready: true, note: progRecipe.type === 'smash' ? 'RNG' : null, produces: progMove.produces, guaranteed: prereqGuaranteed },
               { label: progMove.target, inputs: progMove.reason, ready: false }
             ]
           });
@@ -1049,7 +1115,7 @@
 
     // Phase 1: Direct crafts with strategy-aware boosting
     var FLOWER_BOOST = {'Bronze Pollen':30,'Mithril Pollen':30,'Adamantine Pollen':30,
-      'Tin Pollen':15,'Bronze Flower Transmute':25,'Mithril Flower Transmute':35,
+      'Tin Pollen':15,'Bronze Flower Transmute':25,'Mithril Flower Transmute':35,'Adamantine Flower Transmute':45,
       'Nectar / Cattail Bridge':20,'Pinecone / Moss / Gunpowder Bridge':25};
     var ENDGAME_BOOST = {'Pinecone / Moss / Gunpowder Bridge':20,'Black Lotus':15};
     for (var di = 0; di < directCrafts.length; di++) {
@@ -1112,12 +1178,15 @@
         if (!prereq || !canMake(prereq, inv)) { continue; }
         if (wouldConsumeLastCollectible(prereq, inv)) { continue; }
         var vInv = consumeInputs(inv, prereq);
-        vInv[missingToken] = (vInv[missingToken]||0) + 1;
+        var prereqGuaranteed2 = isGuaranteedOutput(prereq.label, missingToken);
+        if (prereqGuaranteed2) {
+          vInv[missingToken] = (vInv[missingToken]||0) + 1;
+        }
         if (canMake(recipe, vInv) && !wouldConsumeLastCollectible(recipe, vInv)) {
           plans.push({
             goal: recipe.label, value: (RECIPE_VALUE[recipe.label]||5) - 5, type: '2-step',
             steps: [
-              { label: prereq.label, inputs: prereq.inputs.map(tokHuman).join(' + '), ready: true, note: prereq.type === 'smash' ? 'RNG' : null, produces: missingToken },
+              { label: prereq.label, inputs: prereq.inputs.map(tokHuman).join(' + '), ready: true, note: prereq.type === 'smash' ? 'RNG' : null, produces: missingToken, guaranteed: prereqGuaranteed2 },
               { label: recipe.label, inputs: recipe.inputs.map(tokHuman).join(' + '), ready: false }
             ]
           });
@@ -1146,7 +1215,7 @@
         if (!sr || !canMake(sr, testInv)) { ok = false; break; }
         testInv = consumeInputs(testInv, sr);
         // Credit the exact output this prereq step was chosen to produce
-        if (plan.steps[si].produces) {
+        if (plan.steps[si].produces && plan.steps[si].guaranteed) {
           testInv[plan.steps[si].produces] = (testInv[plan.steps[si].produces]||0) + 1;
         }
       }
@@ -1230,17 +1299,21 @@
     if (huntBtn && (huntBtn.classList.contains('loading') || /PROCESSING/i.test(huntBtn.textContent))) { isStuck = true; }
 
     if (isStuck) {
-      if (!_stuckSince) {
-        _stuckSince = Date.now();
+      if (!S.stuckSince) {
+        S.stuckSince = Date.now();
+        S.stuckRefreshCount = S.stuckRefreshCount || 0;
         logEvent('Game buttons stuck on PROCESSING...');
+        save();
       }
+      _stuckSince = S.stuckSince;
+      _stuckRefreshCount = S.stuckRefreshCount || 0;
       var stuckDuration = Date.now() - _stuckSince;
       if (stuckDuration > 15000 && _stuckRefreshCount < 3) {
         // Try refreshing
         _stuckRefreshCount++;
+        S.stuckRefreshCount = _stuckRefreshCount;
         logEvent('Auto-recovering: refresh #' + _stuckRefreshCount + ' (stuck ' + Math.round(stuckDuration/1000) + 's)');
         save();
-        _stuckSince = 0;
         window.location.reload();
         return true;
       }
@@ -1248,6 +1321,8 @@
         // Hard reset: navigate to beetle page fresh
         _stuckRefreshCount = 0;
         _stuckSince = 0;
+        S.stuckSince = 0;
+        S.stuckRefreshCount = 0;
         logEvent('Auto-recovering: hard navigation reset');
         save();
         window.location.href = 'https://www.remilia.net/home?cartridge=beetle';
@@ -1259,6 +1334,11 @@
       if (_stuckSince) { logEvent('Game recovered from stuck state'); }
       _stuckSince = 0;
       _stuckRefreshCount = 0;
+      if (S.stuckSince || S.stuckRefreshCount) {
+        S.stuckSince = 0;
+        S.stuckRefreshCount = 0;
+        save();
+      }
     }
     return false;
   }
@@ -1381,9 +1461,24 @@
   }
 
   /* ─── Render ─── */
+  var _dragState = {active:false,offsetX:0,offsetY:0};
+  var _dragBound = false;
+  function bindDragHandlers() {
+    if (_dragBound) { return; }
+    document.addEventListener('mousemove', function(e) {
+      if (!_dragState.active) { return; }
+      var p = document.getElementById(PANEL_ID);
+      if (!p) { return; }
+      p.style.left = Math.max(0, e.clientX - _dragState.offsetX) + 'px';
+      p.style.top = Math.max(0, e.clientY - _dragState.offsetY) + 'px';
+    });
+    document.addEventListener('mouseup', function() { _dragState.active = false; });
+    _dragBound = true;
+  }
   function renderPanel() {
     var panel = document.getElementById(PANEL_ID);
     if (!panel || panel.classList.contains('hidden')) { return; }
+    bindDragHandlers();
     var inv = S.mergedInventory || {};
     var timers = S.timers || {};
     var stale = isStale();
@@ -1554,7 +1649,7 @@
     // Check each missing beetle and trace what's needed
     var GOAL_RECIPES = {
       'goliath': {name:'Goliath Beetle', needs:[{item:'pinecone',label:'Pinecone'},{item:'pond',label:'Pond Beetle'}], prereq:'Mithril Bridge (Mithril beetle + Mithril Pollen) for Pinecone'},
-      'sunset_moth': {name:'Sunset Moth', needs:[{item:'gazania',label:'Gazania'},{item:'goliath',label:'Adamantine beetle'}], prereq:'Transmute Gazania (Green + Adamantine beetle + Junk Cube)'},
+      'sunset_moth': {name:'Sunset Moth', needs:[{item:'gazania',label:'Gazania'},{item:'any_adamantine_beetle',label:'Adamantine beetle'}], prereq:'Transmute Gazania (Green + Adamantine beetle + Junk Cube)'},
       'mars_rhino': {name:'Mars Rhino', needs:[{item:'black_lotus',label:'Black Lotus'},{item:'sunset_moth',label:'Sunset Moth'},{item:'sabertooth_longhorn',label:'Sabertooth'}], prereq:'Need all 3 Mithril artifacts for Black Lotus'},
       'hercules': {name:'Hercules Beetle', needs:[{item:'golden_scarab',label:'Golden Scarab'},{item:'pollen_adamantine',label:'Adamantine Pollen'},{item:'purple',label:'Purple Beetle'}], prereq:'Golden Scarab is drop-only (Diamond rarity)'}
     };
@@ -1565,7 +1660,7 @@
       var have2 = [];
       for (var ni = 0; ni < goal.needs.length; ni++) {
         var need = goal.needs[ni];
-        if ((inv[need.item]||0) > 0) { have2.push(need.label); }
+        if (tokenCount(inv, need.item) > 0) { have2.push(need.label); }
         else { missing2.push(need.label); }
       }
       if (missing2.length > 0) {
@@ -1616,23 +1711,15 @@
     // Draggable header
     var header = document.querySelector('.bc8-header');
     if (header) {
-      var dragging = false, dragX = 0, dragY = 0;
       header.addEventListener('mousedown', function(e) {
         if (e.target.id === 'bc8-minimize') { return; }
-        dragging = true;
-        var p = document.getElementById(PANEL_ID);
-        dragX = e.clientX - p.offsetLeft;
-        dragY = e.clientY - p.offsetTop;
-        e.preventDefault();
-      });
-      document.addEventListener('mousemove', function(e) {
-        if (!dragging) { return; }
         var p = document.getElementById(PANEL_ID);
         if (!p) { return; }
-        p.style.left = Math.max(0, e.clientX - dragX) + 'px';
-        p.style.top = Math.max(0, e.clientY - dragY) + 'px';
+        _dragState.active = true;
+        _dragState.offsetX = e.clientX - p.offsetLeft;
+        _dragState.offsetY = e.clientY - p.offsetTop;
+        e.preventDefault();
       });
-      document.addEventListener('mouseup', function() { dragging = false; });
     }
   }
 
