@@ -1,5 +1,5 @@
 # BeetleBoy / BeetleCraft — Known Recipes, Facts & Coach Reference
-_Last updated: 2026-04-06 (v8.2 + beetle.wiki cross-reference)_
+_Last updated: 2026-04-07 (v8.7 — hammer intelligence, DOM state detection, full wiki cross-ref)_
 
 This is the clean human-readable recipe and mechanics text file for future AI chats and personal reference.
 
@@ -168,24 +168,24 @@ Confirmed Bronze Flower alternatives for BeetleBoy Key:
 
 ## 5. Pollen recipes
 
+**IMPORTANT: Pollens are ASSEMBLE recipes (100% success rate), not smash.**
+Confirmed by beetle.wiki. No hammer needed, no RNG.
+
 ### Tin Pollen
-- Any 2 same-tier Tin flowers
-Examples:
-- Daisy + Poppy
-- Daisy + Sunflower
-- Poppy + Sunflower
+- Any 2 same-tier Tin flowers (ASSEMBLE)
+- Daisy + Poppy, Daisy + Sunflower, Poppy + Sunflower
 
 ### Bronze Pollen
-- Any 2 same-tier Bronze flowers
-Examples include:
-- Gallic Rose + Gallic Rose
-- other Bronze-flower same-tier pairs
+- Any 2 same-tier Bronze flowers (ASSEMBLE)
+- Gallic Rose + Gallic Rose, Marigold + Milk Thistle, etc.
 
 ### Mithril Pollen
-- Any 2 same-tier Mithril flowers
+- Any 2 same-tier Mithril flowers (ASSEMBLE)
+- Royal Poinciana + Camellia, Camellia + Morning Glory, etc.
 
 ### Adamantine Pollen
-- Any 2 same-tier Adamantine flowers
+- Any 2 same-tier Adamantine flowers (ASSEMBLE)
+- Pincushion + Gazania, etc.
 
 ---
 
@@ -299,35 +299,42 @@ Examples discussed:
 ## 12. Hammer facts
 
 ### Confirmed hammer stats
-**Tin Hammer**
-- Craft bonus: effectively 0%
-- Base break chance: 10%
+| Hammer | Craft Bonus | Base Break | After First Use | Base Cost |
+|--------|-------------|------------|-----------------|-----------|
+| Tin | +0% | 10% | — | 4 (2 Junk Cubes) |
+| Bronze | +5% | 5% | — | 13 |
+| Mithril | +20% | 10% | — | 33 |
+| Adamantine | +35% | 2% | 5% | 159 |
+| Diamond | +90% | 1% | 9% | 1395 |
 
-**Bronze Hammer**
-- Craft bonus: +5%
-- Base break chance: 5%
+### DOM state detection (discovered in v8.6)
+The game exposes three hammer states via CSS classes:
+- `crafting-module__hammer-slot--empty` = BROKEN (was crafted, now broken, needs re-craft)
+- no modifier = OWNED and available for use
+- `crafting-module__hammer-slot--undiscovered` = never crafted this tier
 
-**Mithril Hammer**
-- Craft bonus: +20%
-- Base break chance: 10%
+This is real observed state, not simulated. The script tracks:
+- `ownedHammers[]` — available (not broken) hammers
+- `brokenHammers[]` — hammers that broke
+- `discoveredHammers[]` — all ever crafted
+- `currentHammer` — highest non-broken hammer
 
-**Adamantine Hammer**
-- Craft bonus: +35%
-- Base break chance: 2%
-- Break chance after first use: 5%
-
-**Diamond Hammer**
-- Craft bonus: +90%
-- Base break chance: 1%
-- Break chance after first use: 9%
+### Hammer recommendation rules (v8.7)
+Match hammer to recipe value to avoid wasting expensive hammers:
+- **Value 1-20** (Tin Pollen, Junk Tesseract): use cheapest available (Tin/Bronze)
+- **Value 21-50** (bridges, pollen, Mithril beetles): use Bronze+
+- **Value 51-75** (Adamantine beetles, Rare beetles): use Mithril+
+- **Value 76+** (Epic beetles, endgame): use best available (Adamantine/Diamond)
 
 ### Operational hammer truths
 - only one hammer per type at a time
-- if a hammer breaks, you craft a replacement
-- higher hammer is not automatically better EV for every recipe
-- Bronze is a very efficient workhorse
-- Mithril gives more bonus but also more risk than Bronze
-- premium hammers should be reserved for high-value attempts
+- if a hammer breaks, you craft a replacement (script now recommends this)
+- higher hammer is NOT automatically better EV for every recipe
+- Bronze is the efficient workhorse (5% bonus, only 5% break)
+- Mithril gives more bonus but same break risk as Tin (10%)
+- Adamantine is the practical endgame hammer (35% bonus, only 2% break)
+- Diamond has the highest bonus (+90%) but 9% break after first use — use selectively
+- always re-craft broken cheap hammers before risking expensive ones on low-value crafts
 
 ---
 
@@ -478,20 +485,53 @@ Note: Christmas Beetle is a special seasonal beetle.
 
 ---
 
-## 20. Beetle Coach Tampermonkey script
+## 20. Beetle Coach Tampermonkey script (v8.7)
 
 The companion script is `beetle_coach_v7.user.js` in this directory.
+GitHub: https://github.com/MeridianAnalytics/BeetleCoach
 
-Features:
-- Auto-claim beetle every 2 hours
-- Auto-hunt (optional, costs cheese)
-- Inventory scanning with pagination
-- Pathway engine (multi-step recipe recommendations)
-- Progression tracker (7 stages)
-- Collection tracker (beetles + flowers discovered)
-- Tier badges on all items
-- Junk consolidation (27 types into single count)
-- Activity log
+### Core automation
+- Auto-claim beetle every 2 hours (60s debounce, 12s post-action rescan)
+- Auto-hunt beetle (90s debounce, costs 20 cheese, 100 cheese reserve)
+- Auto-claim daily cheese
+- Post-action in-script refresh (parseTimers + fullScan, no page reload)
+
+### Scanning
+- Layered item extraction: background-image → img src → alt/title
+- Pagination with fingerprinting (stops when content doesn't change)
+- Full scan (with pagination, authoritative inventory) on boot + manual
+- Passive scan every 30s (visibility-gated, confirms existing items, adds validated new drops)
+- Three-band freshness: fresh (green) / warming (amber) / stale (red)
+- Unresolved node count logged per scan
+
+### Recommendations
+- Smart group consumption: non-collectibles first, duplicates before singletons, strategic value ranking (Ladybug before Purple for bronze beetle tokens)
+- Collection protection: never consume last copy of a collected beetle/flower
+- Endgame ingredient protection: preserves Black Lotus, Sunset Moth, Sabertooth for Mars Rhino; Golden Scarab, Adamantine Pollen for Hercules
+- Already-owned filter: won't recommend crafting beetles you already have (exception: items needed as ingredients for higher recipes)
+- 2-step chains with cross-plan consumption simulation and output crediting
+- SAFE/RNG badges on craftable recipes
+
+### Hammer intelligence
+- Real DOM state detection: owned / broken / undiscovered via CSS classes
+- Hammer recommendation per recipe based on value (cheap hammer for low-value, premium for high-value)
+- Broken hammer re-craft suggestions
+- Status strip shows broken hammers in red
+
+### Display
+- Session stats: claims, hunts, cheese claims, gained beetles, duration
+- Resource planner: bill of materials for missing collection goals
+- Progression tracker: 7-stage bar with next goals
+- Collection tracker: beetles X/18, flowers X/12, missing list
+- Inventory with tier badges, junk consolidation
+- Activity log with timestamps
+- Minimize via beetle emoji click in header
+
+### Architecture
+- Single IIFE, single file, no dependencies
+- Store: Tampermonkey GM_getValue/GM_setValue with v7→v8 migration
+- All DOM IDs use bc8- prefix
+- Conservative automation: won't act on stale data, explicit logging for every action and skip
 
 ---
 

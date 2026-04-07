@@ -1,5 +1,5 @@
 # BeetleBoy / BeetleCraft Knowledge Base
-_Last updated: 2026-04-01_
+_Last updated: 2026-04-07 (v8.7 — see beetle_known_recipes_human_readable.md for latest corrections)_
 
 This document is a durable handoff/reference file for future AI conversations about the RemiliaNET BeetleBoy / BeetleCraft game.
 

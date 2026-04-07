@@ -1,5 +1,5 @@
 # BeetleBoy / BeetleCraft — Mathematical Value Model
-_Last updated: 2026-04-02_
+_Last updated: 2026-04-07 (v8.7 — hammer intelligence, corrected pollen types)_
 
 ## Methodology
 
@@ -217,3 +217,37 @@ _Last updated: 2026-04-02_
 | **Total for full collection** | | **~5000-7000+** |
 
 ~5000-7000 catch-equivalent farming actions for complete collection, assuming average RNG.
+
+---
+
+## Hammer Usage Guide
+
+### Match hammer to recipe value (v8.7 recommendation engine)
+
+| Recipe Value | Hammer Tier | Examples |
+|---|---|---|
+| 1-20 | Cheapest available (Tin/Bronze) | Tin Pollen, Junk Tesseract, Bronze Pollen |
+| 21-50 | Bronze+ | Nectar/Cattail Bridge, Mithril Bridge, Mithril Pollen |
+| 51-75 | Mithril+ | Goliath, Stag, Bombardier, Rare beetles |
+| 76+ | Best available (Adamantine/Diamond) | Epic beetles, Black Lotus, Mars Rhino |
+
+### EV analysis for hammer selection
+- **Tin Hammer** on Tin Pollen (value 5): if it breaks, you lose 4 base units. EV loss = 0.4. Acceptable.
+- **Adamantine Hammer** on Tin Pollen (value 5): if it breaks, you lose 159 base units. EV loss = 3.18. WASTEFUL.
+- **Adamantine Hammer** on Goliath Beetle (value 60): if it breaks, you lose 159 base units. EV gain from +35% bonus is significant. Acceptable.
+- **Diamond Hammer** on Mars Rhino (value 95): +90% bonus on a 7688 base cost recipe. Worth the 1% break risk.
+
+### Key rule
+**Always re-craft broken cheap hammers before risking expensive ones on low-value crafts.**
+A broken Tin Hammer costs 2 Junk Cubes (4 base units) to replace. Using Adamantine for a Tin Pollen craft risks 159 base units for a 5-value output.
+
+---
+
+## Corrections log
+
+### v8.7 (April 7, 2026)
+- Pollen recipes are ASSEMBLE (100% success), not smash — confirmed by beetle.wiki
+- Hammer states detectable from DOM: owned / broken (--empty) / undiscovered
+- Goliath, Stag, Golden Scarab confirmed droppable from catches (beetle.wiki)
+- 27 confirmed anti-recipes (dead combos) documented
+- Golden Scarab is drop-only (Diamond rarity) — no crafting recipe exists
