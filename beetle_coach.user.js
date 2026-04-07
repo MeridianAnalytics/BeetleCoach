@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      11.3.0
+// @version      11.4.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '11.3.0';
+  const CURRENT_VER = '11.4.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -1272,10 +1272,12 @@
     if (!navBC || !/ready/i.test(navBC.textContent)) { return false; }
     // Navigate to beetle cartridge
     if (!ensureCartridge('beetle', 'claim')) { return true; }
-    var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
-    if (btn && !btn.disabled) {
+    // NOTE: Clicking claim/hunt buttons auto-loads the cartridge even when "disconnected"
+    // So we only check for .disabled class (on cooldown), NOT .disconnected
+    var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled)');
+    if (btn) {
       var btnText = btn.textContent || '';
-      if (/\d+[mhMs]\s/i.test(btnText)) { return false; }
+      if (/\d+[mhMs]\s/i.test(btnText) || /PROCESSING/i.test(btnText)) { return false; }
       btn.click(); _lastClaimTime = Date.now();
       S.session.claims++;
       logEvent('Auto-claimed beetle!');
@@ -1291,15 +1293,13 @@
     if (cheese < HUNT_COST) { return false; }
     if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return false; }
     if (Date.now() - _lastHuntTime < 15000) { return false; }
-    // Check hunt isn't on cooldown
     var huntCostEl = document.querySelector('.beetle-catch-module__hunt-button-cheese-cost');
     if (huntCostEl && /cooldown/i.test(huntCostEl.textContent)) { return false; }
-    // Navigate to beetle cartridge
-    if (!ensureCartridge('beetle', 'hunt')) { return true; }
-    var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
-    if (btn && !btn.disabled) {
+    // NOTE: Clicking hunt auto-loads the cartridge even when "disconnected"
+    var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled)');
+    if (btn) {
       var btnText = btn.textContent || '';
-      if (/cooldown/i.test(btnText)) { return false; }
+      if (/cooldown/i.test(btnText) || /PROCESSING/i.test(btnText)) { return false; }
       btn.click(); _lastHuntTime = Date.now();
       S.session.hunts++;
       logEvent('Auto-hunted (-' + HUNT_COST + ' cheese)');
@@ -1669,7 +1669,7 @@
       if (tryAutoHunt()) { return; }
       tryClaimCheese();
     }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v11.3] booted');
+    console.log('[BeetleCoach v11.4] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
