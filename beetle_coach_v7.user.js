@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.1.0
-// @description  BeetleBoy coach: auto-claim, pathways, value-sorted recipes, tier labels, activity log.
+// @version      8.2.0
+// @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -11,11 +11,19 @@
 (function () {
   'use strict';
 
-  const STORE_KEY = 'beetle_coach_v7_store';
-  const PANEL_ID = 'bc7-panel';
-  const BTN_ID = 'bc7-toggle';
-  const STYLE_ID = 'bc7-style';
-  const CURRENT_VER = '8.1.0';
+  /* ─── Config ─── */
+  const CURRENT_VER = '8.2.0';
+  const OLD_STORE_KEY = 'beetle_coach_v7_store';
+  const STORE_KEY = 'beetle_coach_v8_store';
+  const PANEL_ID = 'bc8-panel';
+  const BTN_ID = 'bc8-toggle';
+  const STYLE_ID = 'bc8-style';
+  const STALE_THRESHOLD = 120000; // 2 min
+  const HUNT_COST = 20;
+  const MIN_CHEESE_RESERVE = 100;
+  const PASSIVE_SCAN_INTERVAL = 30000; // 30s
+  const TIMER_INTERVAL = 5000;
+  const ACTION_INTERVAL = 10000;
 
   /* ─── Labels ─── */
   const LABELS = {
@@ -133,108 +141,79 @@
     {label:'Stag Beetle',type:'smash',inputs:['moss','pond'],notes:'Moss + Pond Beetle.'},
     {label:'Goliath Beetle',type:'smash',inputs:['pinecone','pond'],notes:'Pinecone + Pond Beetle.'},
     {label:'Goliath Beetle (alt)',type:'smash',inputs:['pinecone','monarch'],notes:'Pinecone + Monarch.'},
-    // Rare beetles (Mithril flower + Mithril beetle)
-    {label:'Giraffe Weevil',type:'smash',inputs:['royal_poinciana','pond'],notes:'Royal Poinciana + Pond Beetle.'},
+    {label:'Giraffe Weevil',type:'smash',inputs:['royal_poinciana','pond'],notes:'Royal Poinciana + Pond.'},
     {label:'Giraffe Weevil (alt)',type:'smash',inputs:['royal_poinciana','monarch'],notes:'Royal Poinciana + Monarch.'},
-    {label:'Pillbug',type:'smash',inputs:['camellia','pond'],notes:'Camellia + Pond Beetle.'},
+    {label:'Pillbug',type:'smash',inputs:['camellia','pond'],notes:'Camellia + Pond.'},
     {label:'Pillbug (alt)',type:'smash',inputs:['camellia','monarch'],notes:'Camellia + Monarch.'},
-    {label:'Imperial Tortoise Beetle',type:'smash',inputs:['morning_glory','pond'],notes:'Morning Glory + Pond Beetle.'},
+    {label:'Imperial Tortoise Beetle',type:'smash',inputs:['morning_glory','pond'],notes:'Morning Glory + Pond.'},
     {label:'Imperial Tortoise Beetle (alt)',type:'smash',inputs:['morning_glory','monarch'],notes:'Morning Glory + Monarch.'},
-    // Epic beetles (Adamantine flower + Adamantine beetle)
     {label:'Sabertooth Longhorn Beetle',type:'smash',inputs:['pincushion','goliath'],notes:'Pincushion + Goliath.'},
     {label:'Sabertooth Longhorn (Stag)',type:'smash',inputs:['pincushion','stag'],notes:'Pincushion + Stag.'},
     {label:'Sabertooth Longhorn (Bomb)',type:'smash',inputs:['pincushion','bombardier'],notes:'Pincushion + Bombardier.'},
     {label:'Sunset Moth',type:'smash',inputs:['gazania','goliath'],notes:'Gazania + Goliath.'},
     {label:'Sunset Moth (Stag)',type:'smash',inputs:['gazania','stag'],notes:'Gazania + Stag.'},
     {label:'Sunset Moth (Bomb)',type:'smash',inputs:['gazania','bombardier'],notes:'Gazania + Bombardier.'},
-    // Endgame
-    {label:'Black Lotus',type:'smash',inputs:['gunpowder','moss','pinecone'],notes:'Gunpowder + Moss + Pinecone.'},
-    {label:'Mars Rhino Beetle',type:'smash',inputs:['black_lotus','sunset_moth','sabertooth_longhorn'],notes:'Black Lotus + Sunset Moth + Sabertooth.'},
+    {label:'Black Lotus',type:'smash',inputs:['gunpowder','moss','pinecone'],notes:'All 3 Mithril artifacts.'},
+    {label:'Mars Rhino Beetle',type:'smash',inputs:['black_lotus','sunset_moth','sabertooth_longhorn'],notes:'Black Lotus + Sunset + Sabertooth.'},
     {label:'Hercules Beetle',type:'smash',inputs:['golden_scarab','pollen_adamantine','purple'],notes:'Golden Scarab + Adamantine Pollen + Purple.'}
   ];
-  // Value scores from mathematical model (see beetleboy_value_model.md)
-  // Based on: base cost, craft depth, collection value, crafting utility
   const RECIPE_VALUE = {
-    // Tier 10 — Legendary
-    'Hercules Beetle':100,'Mars Rhino Beetle':95,
-    // Tier 9 — Endgame
-    'Black Lotus':88,'Diamond Hammer':82,
-    // Tier 8 — Epic
-    'Sabertooth Longhorn Beetle':78,'Sunset Moth':78,
-    'Sabertooth Longhorn (Stag)':78,'Sabertooth Longhorn (Bomb)':78,
-    'Sunset Moth (Stag)':78,'Sunset Moth (Bomb)':78,
-    'Adamantine Pollen':75,
-    // Tier 7 — Adamantine
-    'Adamantine Hammer':65,
+    'Hercules Beetle':100,'Mars Rhino Beetle':95,'Black Lotus':88,'Diamond Hammer':82,
+    'Sabertooth Longhorn Beetle':78,'Sunset Moth':78,'Sabertooth Longhorn (Stag)':78,'Sabertooth Longhorn (Bomb)':78,
+    'Sunset Moth (Stag)':78,'Sunset Moth (Bomb)':78,'Adamantine Pollen':75,'Adamantine Hammer':65,
     'Goliath Beetle':60,'Goliath Beetle (alt)':60,'Stag Beetle':60,
     'Bombardier Beetle':55,'Bombardier Beetle (alt)':55,
-    // Tier 5-6 — Rare + Artifacts
-    'Giraffe Weevil':55,'Giraffe Weevil (alt)':55,
-    'Pillbug':55,'Pillbug (alt)':55,
+    'Giraffe Weevil':55,'Giraffe Weevil (alt)':55,'Pillbug':55,'Pillbug (alt)':55,
     'Imperial Tortoise Beetle':55,'Imperial Tortoise Beetle (alt)':55,
-    'Pinecone / Moss / Gunpowder Bridge':50,'Nectar / Cattail Bridge':40,
-    'Mithril Pollen':40,
-    // Tier 4 — Mithril
+    'Pinecone / Moss / Gunpowder Bridge':50,'Nectar / Cattail Bridge':40,'Mithril Pollen':40,
     'Mithril Hammer':30,'Pond Beetle':25,'Monarch':25,'Monarch (alt)':25,
-    // Tier 3 — Bronze Bridge
-    'Bronze Hammer':15,'Bronze Pollen':12,
-    // Tier 2 — Compression
-    'Junk Tesseract':8,'Tin Hammer':6,
-    // Tier 1 — Base crafts
-    'Tin Pollen':5,'Junk Cube':1
+    'Bronze Hammer':15,'Bronze Pollen':12,'Junk Tesseract':8,'Tin Hammer':6,'Tin Pollen':5,'Junk Cube':1
   };
 
-  /* ─── Progression Stages ─── */
+  /* ─── Progression ─── */
   const ALL_BEETLES = ['green','ladybug','purple','pond','monarch','goliath','stag','bombardier',
     'giraffe_weevil','pillbug','imperial_tortoise','sabertooth_longhorn','sunset_moth',
     'mars_rhino','golden_scarab','hercules','skull','christmas'];
   const ALL_FLOWERS = ['daisy','poppy','sunflower','marigold','gallic_rose','milk_thistle',
     'royal_poinciana','camellia','morning_glory','pincushion','gazania','black_lotus'];
+  const COLLECTIBLES = new Set([...ALL_BEETLES, ...ALL_FLOWERS]);
   const STAGES = [
-    {n:1, name:'Gathering', check:['green'], desc:'Farm beetles + junk, build Junk Cubes'},
-    {n:2, name:'Pollen & Bridges', check:['pollen_tin'], desc:'Craft pollen, generate Nectar/Cattail'},
-    {n:3, name:'Mithril Beetles', check:['pond','monarch'], desc:'Craft Pond Beetle + Monarch'},
-    {n:4, name:'Adamantine Beetles', check:['bombardier','stag','goliath'], desc:'Craft Goliath/Stag/Bombardier'},
-    {n:5, name:'Rare Beetles', check:['giraffe_weevil','pillbug','imperial_tortoise'], desc:'Mithril flower + Mithril beetle routes'},
-    {n:6, name:'Epic Beetles', check:['sabertooth_longhorn','sunset_moth'], desc:'Adamantine flower + Adamantine beetle routes'},
-    {n:7, name:'Endgame', check:['black_lotus','mars_rhino','hercules'], desc:'Black Lotus, Mars Rhino, Hercules'}
+    {n:1,name:'Gathering',check:['green'],desc:'Farm beetles + junk'},
+    {n:2,name:'Pollen & Bridges',check:['pollen_tin'],desc:'Craft pollen, generate bridges'},
+    {n:3,name:'Mithril Beetles',check:['pond','monarch'],desc:'Craft Pond + Monarch'},
+    {n:4,name:'Adamantine Beetles',check:['bombardier','stag','goliath'],desc:'Craft Goliath/Stag/Bombardier'},
+    {n:5,name:'Rare Beetles',check:['giraffe_weevil','pillbug','imperial_tortoise'],desc:'Mithril flower + beetle'},
+    {n:6,name:'Epic Beetles',check:['sabertooth_longhorn','sunset_moth'],desc:'Adamantine flower + beetle'},
+    {n:7,name:'Endgame',check:['black_lotus','mars_rhino','hercules'],desc:'Black Lotus, Mars Rhino, Hercules'}
   ];
   function getStage(inv) {
-    // Return the highest COMPLETED stage (all check items owned)
-    // Fall back to highest partially-started stage
     let completed = 0;
     for (const s of STAGES) {
-      if (s.check.every(k => (inv[k]||0) > 0)) {
-        completed = s.n;
-      } else {
-        break; // First incomplete stage = this is where you are
-      }
+      if (s.check.every(function(k) { return (inv[k]||0) > 0; })) { completed = s.n; }
+      else { break; }
     }
     return completed;
   }
   function getNextStageGoals(inv, stage) {
-    if (stage >= 7) return {next:null, goals:[]};
-    const next = STAGES[stage]; // stage is 0-indexed offset by +1
-    if (!next) return {next:null, goals:[]};
-    const missing = next.check.filter(k => !(inv[k]||0));
-    return {next, goals:missing.map(k=>dn(k))};
+    if (stage >= 7) { return {next:null, goals:[]}; }
+    const next = STAGES[stage];
+    if (!next) { return {next:null, goals:[]}; }
+    const missing = next.check.filter(function(k) { return !(inv[k]||0); });
+    return {next:next, goals:missing.map(function(k) { return dn(k); })};
   }
-
-  /* ─── Collection ─── */
   function getCollection(inv) {
-    const ownedB = ALL_BEETLES.filter(k => (inv[k]||0) > 0);
-    const ownedF = ALL_FLOWERS.filter(k => (inv[k]||0) > 0);
-    const missingB = ALL_BEETLES.filter(k => !(inv[k]||0));
-    const missingF = ALL_FLOWERS.filter(k => !(inv[k]||0));
-    return {ownedB, ownedF, missingB, missingF,
-      totalB:ALL_BEETLES.length, totalF:ALL_FLOWERS.length};
+    var ownedB = ALL_BEETLES.filter(function(k) { return (inv[k]||0) > 0; });
+    var ownedF = ALL_FLOWERS.filter(function(k) { return (inv[k]||0) > 0; });
+    var missingB = ALL_BEETLES.filter(function(k) { return !(inv[k]||0); });
+    var missingF = ALL_FLOWERS.filter(function(k) { return !(inv[k]||0); });
+    return {ownedB:ownedB,ownedF:ownedF,missingB:missingB,missingF:missingF,totalB:ALL_BEETLES.length,totalF:ALL_FLOWERS.length};
   }
 
   /* ─── Filters ─── */
   const BLOCKLIST = /^(svg|icon|button|slot|empty|more|smash|eject|assemble|home|search|left|right|go_back|show_password|claim|load|logo|dots|arrow|cheeseman|static\d*|beetleboy_logo|beetle_catch|craft|beetle_shader)$/i;
   const PFP_HASH = /^(pfp_\d+|retart|remilio|radbro|default|[a-f0-9]{20,})$/i;
 
-  /* ─── Store ─── */
+  /* ─── Store with migration ─── */
   function defaults() {
     return {ver:CURRENT_VER,mergedInventory:{},currentHammer:null,ownedHammers:[],
       currentHammerBonus:null,currentHammerBreakChance:null,
@@ -243,211 +222,305 @@
   }
   function load() {
     try {
-      const r=GM_getValue(STORE_KEY,null);
-      if (!r) return defaults();
-      const p=Object.assign(defaults(),JSON.parse(r));
-      if (p.ver!==CURRENT_VER) { p.mergedInventory={}; p.ver=CURRENT_VER; p.log=[]; }
+      // Try new key first
+      var raw = GM_getValue(STORE_KEY, null);
+      // Migrate from old key if needed
+      if (!raw) {
+        raw = GM_getValue(OLD_STORE_KEY, null);
+        if (raw) {
+          GM_setValue(STORE_KEY, raw);
+          console.log('[BC] Migrated store from v7 to v8 key');
+        }
+      }
+      if (!raw) { return defaults(); }
+      var p = Object.assign(defaults(), JSON.parse(raw));
+      if (p.ver !== CURRENT_VER) { p.mergedInventory = {}; p.ver = CURRENT_VER; p.log = []; }
       return p;
-    } catch { return defaults(); }
+    } catch(e) { return defaults(); }
   }
-  function save() { try { GM_setValue(STORE_KEY,JSON.stringify(S)); } catch {} }
-  function resetStore() { S=defaults(); save(); renderPanel(); }
-  let S = load();
+  function save() { try { GM_setValue(STORE_KEY, JSON.stringify(S)); } catch(e) {} }
+  function resetStore() { S = defaults(); save(); renderPanel(); }
+  var S = load();
 
   /* ─── Activity Log ─── */
   function logEvent(msg) {
-    const ts = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    var ts = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
     S.log.push(ts + ' ' + msg);
-    if (S.log.length > 30) S.log = S.log.slice(-30);
+    if (S.log.length > 30) { S.log = S.log.slice(-30); }
     save();
-    // Update log DOM in-place if visible
-    const el = document.getElementById('bc7-log');
+    var el = document.getElementById('bc8-log');
     if (el) {
-      el.innerHTML = S.log.slice().reverse().map(l => '<div class="bc7-log-line">' + l + '</div>').join('');
+      el.innerHTML = S.log.slice().reverse().map(function(l) { return '<div class="bc8-log-line">' + l + '</div>'; }).join('');
     }
   }
 
   /* ─── Helpers ─── */
   function norm(raw) {
-    if (!raw) return null;
-    let k=String(raw).toLowerCase().trim().replace(/\.[a-z0-9]+$/i,'')
+    if (!raw) { return null; }
+    var k = String(raw).toLowerCase().trim().replace(/\.[a-z0-9]+$/i,'')
       .replace(/%20/g,'_').replace(/[^\w]+/g,'_').replace(/^_+|_+$/g,'');
-    return ITEM_ALIASES[k]||k;
+    return ITEM_ALIASES[k] || k;
   }
-  function dn(k) { return LABELS[k]||k; }
-  function cnt(inv,arr) { return arr.reduce((s,k)=>s+(inv[k]||0),0); }
+  function dn(k) { return LABELS[k] || k; }
+  function cnt(inv, arr) { return arr.reduce(function(s,k) { return s + (inv[k]||0); }, 0); }
   function tokHuman(t) {
-    const m={any_junk:'any junk',any_tin_flower:'Tin flowers x2',any_bronze_flower:'Bronze flower',
+    var m = {any_junk:'any junk',any_tin_flower:'Tin flowers x2',any_bronze_flower:'Bronze flower',
       any_mithril_flower:'Mithril flower',any_adamantine_flower:'Adamantine flower',
       any_bronze_beetle:'Bronze beetle',any_mithril_beetle:'Mithril beetle'};
-    return m[t]||dn(t);
+    return m[t] || dn(t);
   }
   function canMake(r, inv) {
-    const needed = {};
-    for (const t of r.inputs) needed[t] = (needed[t]||0) + 1;
-    for (const [token, times] of Object.entries(needed)) {
-      const group = TOKEN_GROUPS[token];
-      if (group) { if (cnt(inv,group) < times) return false; }
-      else { if ((inv[token]||0) < times) return false; }
+    var needed = {};
+    for (var i = 0; i < r.inputs.length; i++) {
+      var t = r.inputs[i];
+      needed[t] = (needed[t]||0) + 1;
+    }
+    for (var token in needed) {
+      var times = needed[token];
+      var group = TOKEN_GROUPS[token];
+      if (group) { if (cnt(inv,group) < times) { return false; } }
+      else { if ((inv[token]||0) < times) { return false; } }
     }
     return true;
   }
   function isValid(k) { return k && !BLOCKLIST.test(k) && !PFP_HASH.test(k); }
-  function extractKey(el) {
-    if (!el) return null;
-    const bg=(el.style&&el.style.backgroundImage)||getComputedStyle(el).backgroundImage||'';
-    const m=bg.match(/\/beetle\/images\/icons\/[^/]+\/([^."')]+)\.(png|jpg|webp|gif)/i);
-    return m&&m[1]?norm(m[1]):null;
+
+  /* ─── FIX 1: Layered Item Extraction ─── */
+  var _unresolvedCount = 0;
+  function resolveItemKey(itemEl, imgEl) {
+    // Source 1: background-image URL (primary)
+    if (imgEl) {
+      var bg = (imgEl.style && imgEl.style.backgroundImage) || '';
+      if (!bg || bg === 'none') {
+        try { bg = getComputedStyle(imgEl).backgroundImage || ''; } catch(e) {}
+      }
+      var m = bg.match(/\/beetle\/images\/icons\/[^/]+\/([^."')]+)\.(png|jpg|webp|gif|svg)/i);
+      if (m && m[1]) { return norm(m[1]); }
+    }
+    // Source 2: <img src> tag inside the image element
+    if (imgEl) {
+      var img = imgEl.querySelector('img') || (imgEl.tagName === 'IMG' ? imgEl : null);
+      if (img) {
+        var src = img.getAttribute('src') || '';
+        var m2 = src.match(/\/beetle\/images\/icons\/[^/]+\/([^."'?#]+)\.(png|jpg|webp|gif|svg)/i);
+        if (m2 && m2[1]) { return norm(m2[1]); }
+        // Fallback: any filename from src
+        var m3 = src.match(/\/([^/."'?#]+)\.(png|jpg|webp|gif|svg)/i);
+        if (m3 && m3[1]) { return norm(m3[1]); }
+      }
+    }
+    // Source 3: alt, title, aria-label
+    var candidates = imgEl ? [imgEl, itemEl] : [itemEl];
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var el = candidates[ci];
+      if (!el) { continue; }
+      var txt = el.getAttribute('alt') || el.getAttribute('title') || el.getAttribute('aria-label') || '';
+      if (txt) { return norm(txt); }
+    }
+    return null;
   }
 
   /* ─── Scanning ─── */
   function scanPage(sel, imgCls, cntCls) {
-    const r={};
-    document.querySelectorAll(sel).forEach(item => {
-      const k=extractKey(item.querySelector(imgCls));
-      if (!isValid(k)) return;
-      const el=item.querySelector(cntCls);
-      const c=el?parseInt(el.textContent.trim(),10)||1:1;
-      r[k]=Math.max(r[k]||0,c);
+    var r = {};
+    var unresolved = 0;
+    document.querySelectorAll(sel).forEach(function(item) {
+      var imgEl = item.querySelector(imgCls);
+      var k = resolveItemKey(item, imgEl);
+      if (!k || !isValid(k)) { unresolved++; return; }
+      var el = item.querySelector(cntCls);
+      var c = el ? (parseInt(el.textContent.trim(), 10) || 1) : 1;
+      r[k] = Math.max(r[k]||0, c);
     });
+    _unresolvedCount += unresolved;
     return r;
   }
 
-  let _scanning = false;
+  /* ─── FIX 8: Pagination with fingerprinting ─── */
+  function fingerprint(items) {
+    return Object.keys(items).sort().map(function(k) { return k + ':' + items[k]; }).join(',');
+  }
+
+  var _scanning = false;
   async function fullScan() {
-    if (_scanning) return;
+    if (_scanning) { return; }
     _scanning = true;
-    const oldInv = Object.assign({}, S.mergedInventory);
+    _unresolvedCount = 0;
+    var oldInv = Object.assign({}, S.mergedInventory);
     try {
-      const merged = {};
-      const merge = (items) => { for (const [k,v] of Object.entries(items)) merged[k]=Math.max(merged[k]||0,v); };
-      // Crafting module pages
+      var merged = {};
+      var merge = function(items) { for (var k in items) { merged[k] = Math.max(merged[k]||0, items[k]); } };
+      // Crafting module with fingerprint-based pagination
+      var lastFP = '';
       merge(scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
-      for (let i=0;i<20;i++) {
-        const more=document.querySelector('.crafting-module__pagination-button');
-        if (!more || more.disabled || more.classList.contains('disabled')) break; more.click();
-        await new Promise(r=>setTimeout(r,400));
-        merge(scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
+      for (var i = 0; i < 20; i++) {
+        var more = document.querySelector('.crafting-module__pagination-button');
+        if (!more || more.disabled || more.classList.contains('disabled')) { break; }
+        more.click();
+        await new Promise(function(r) { setTimeout(r, 400); });
+        var page = scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count');
+        var fp = fingerprint(page);
+        if (fp === lastFP) { break; } // Page didn't change
+        lastFP = fp;
+        merge(page);
       }
-      // Catch module pages
+      // Catch module with fingerprint-based pagination
+      lastFP = '';
       merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
-      for (let i=0;i<20;i++) {
-        const more=document.querySelector('.beetle-catch-module__pagination-button');
-        if (!more || more.disabled || more.classList.contains('disabled')) break; more.click();
-        await new Promise(r=>setTimeout(r,400));
-        merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
+      for (var j = 0; j < 20; j++) {
+        var more2 = document.querySelector('.beetle-catch-module__pagination-button');
+        if (!more2 || more2.disabled || more2.classList.contains('disabled')) { break; }
+        more2.click();
+        await new Promise(function(r) { setTimeout(r, 400); });
+        var page2 = scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count');
+        var fp2 = fingerprint(page2);
+        if (fp2 === lastFP) { break; }
+        lastFP = fp2;
+        merge(page2);
       }
       if (Object.keys(merged).length > 0) {
         S.mergedInventory = merged;
-        // Log changes
-        const changes = [];
-        for (const [k,v] of Object.entries(merged)) {
-          const old = oldInv[k] || 0;
-          if (v > old && !JUNK_SET.has(k) && k !== 'cheese') changes.push(dn(k) + ' +' + (v - old));
+        var changes = [];
+        for (var k in merged) {
+          var old = oldInv[k] || 0;
+          if (merged[k] > old && !JUNK_SET.has(k) && k !== 'cheese') { changes.push(dn(k) + ' +' + (merged[k] - old)); }
         }
-        const junkNew = cnt(merged, ANY_JUNK);
-        const junkOld = cnt(oldInv, ANY_JUNK);
-        if (junkNew > junkOld) changes.push('Junk +' + (junkNew - junkOld));
-        const cheeseNew = merged.cheese || 0;
-        const cheeseOld = oldInv.cheese || 0;
-        if (cheeseNew !== cheeseOld) changes.push('Cheese ' + (cheeseNew > cheeseOld ? '+' : '') + (cheeseNew - cheeseOld));
-        if (changes.length) {
-          logEvent('Scan: ' + changes.join(', '));
-        } else {
-          logEvent('Scan: no changes');
-        }
+        var junkDiff = cnt(merged, ANY_JUNK) - cnt(oldInv, ANY_JUNK);
+        if (junkDiff > 0) { changes.push('Junk +' + junkDiff); }
+        var cheeseDiff = (merged.cheese||0) - (oldInv.cheese||0);
+        if (cheeseDiff !== 0) { changes.push('Cheese ' + (cheeseDiff > 0 ? '+' : '') + cheeseDiff); }
+        var summary = changes.length ? changes.join(', ') : 'no changes';
+        if (_unresolvedCount > 0) { summary += ' (' + _unresolvedCount + ' unresolved)'; }
+        logEvent('Scan: ' + summary);
       } else {
-        logEvent('Scan: no items found');
+        logEvent('Scan: no items found' + (_unresolvedCount ? ' (' + _unresolvedCount + ' unresolved)' : ''));
       }
     } finally { _scanning = false; }
     parseTimers(); parseHammer(); parseLevel(); parseCraftMode();
     S.lastScanTime = Date.now(); save(); renderPanel();
   }
 
-  /* ─── Timer Refresh (in-place, no re-render) ─── */
+  /* ─── FIX 2: Passive inventory refresh (no pagination, visibility-gated) ─── */
+  function passiveScan() {
+    if (_scanning) { return; }
+    if (document.hidden) { return; } // Tab not visible
+    // Only scan if game modules exist in DOM
+    var hasGame = document.querySelector('.crafting-module__beetle-item') || document.querySelector('.beetle-catch-module__beetle-item');
+    if (!hasGame) { return; }
+    // Quick scan visible page only, merge into existing
+    var vis = {};
+    var merge = function(items) { for (var k in items) { vis[k] = Math.max(vis[k]||0, items[k]); } };
+    merge(scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
+    merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
+    if (Object.keys(vis).length > 0) {
+      var m = Object.assign({}, S.mergedInventory);
+      for (var k in vis) { m[k] = Math.max(m[k]||0, vis[k]); }
+      S.mergedInventory = m;
+      S.lastScanTime = Date.now();
+      save();
+    }
+    parseTimers(); parseHammer();
+  }
+
+  /* ─── Timer refresh (in-place DOM update) ─── */
   function refreshTimers() {
-    if (_scanning) return;
+    if (_scanning) { return; }
     parseTimers();
-    const fmtT = (v) => {
-      if (!v) return '\u2014';
-      if (/ready/i.test(v)) return '<span class="bc7-ready">Ready!</span>';
-      return '<span class="bc7-timer">' + v + '</span>';
+    var fmtT = function(v) {
+      if (!v) { return '\u2014'; }
+      if (/ready/i.test(v)) { return '<span class="bc8-badge bc8-ready">Ready</span>'; }
+      return '<span class="bc8-badge bc8-countdown">' + v + '</span>';
     };
-    const bc=document.getElementById('bc7-t-claim'); if(bc) bc.innerHTML=fmtT(S.timers.beetleCatch);
-    const hc=document.getElementById('bc7-t-hunt'); if(hc) hc.innerHTML=fmtT(S.timers.huntCooldown);
-    const dc=document.getElementById('bc7-t-cheese'); if(dc) dc.innerHTML=fmtT(S.timers.dailyCheese);
+    var bc = document.getElementById('bc8-t-claim'); if (bc) { bc.innerHTML = fmtT(S.timers.beetleCatch); }
+    var hc = document.getElementById('bc8-t-hunt'); if (hc) { hc.innerHTML = fmtT(S.timers.huntCooldown); }
+    var dc = document.getElementById('bc8-t-cheese'); if (dc) { dc.innerHTML = fmtT(S.timers.dailyCheese); }
+    // Update freshness chip
+    var fc = document.getElementById('bc8-fresh'); if (fc) {
+      var stale = isStale();
+      fc.className = 'bc8-badge ' + (stale ? 'bc8-stale' : 'bc8-fresh-ok');
+      fc.textContent = stale ? 'STALE' : scanAge();
+    }
   }
 
   /* ─── Parse Functions ─── */
   function parseTimers() {
-    const t={beetleCatch:null,dailyCheese:null,huntCooldown:null};
-    const bc=document.querySelector('.beetle-game-nav .info span:last-child');
-    if (bc) { const v=bc.textContent.trim(); if(/\d/.test(v)) t.beetleCatch=v; }
+    var t = {beetleCatch:null, dailyCheese:null, huntCooldown:null};
+    var bc = document.querySelector('.beetle-game-nav .info span:last-child');
+    if (bc) { var v = bc.textContent.trim(); if (/\d/.test(v)) { t.beetleCatch = v; } }
     if (!t.beetleCatch) {
-      const nav=document.querySelector('.beetle-game-nav .info');
-      if (nav&&/ready/i.test(nav.textContent)) t.beetleCatch='Ready!';
+      var nav = document.querySelector('.beetle-game-nav .info');
+      if (nav && /ready/i.test(nav.textContent)) { t.beetleCatch = 'Ready!'; }
     }
-    const dc=document.querySelector('.cheese-claim-nav .info span:last-child');
-    if (dc) { const v=dc.textContent.trim(); if(/\d/.test(v)) t.dailyCheese=v; }
-    const cooldown=document.querySelector('.beetle-catch-module__cooldown-timer');
+    var dc = document.querySelector('.cheese-claim-nav .info span:last-child');
+    if (dc) { var v2 = dc.textContent.trim(); if (/\d/.test(v2)) { t.dailyCheese = v2; } }
+    if (!t.dailyCheese) {
+      var navC = document.querySelector('.cheese-claim-nav .info');
+      if (navC && /ready/i.test(navC.textContent)) { t.dailyCheese = 'Ready!'; }
+    }
+    var cooldown = document.querySelector('.beetle-catch-module__cooldown-timer');
     if (cooldown) {
-      let v=cooldown.textContent.trim().replace(/\s*to\s+next\s+claim\s*/i,'').trim();
-      if(/\d/.test(v)) t.beetleCatch=v;
+      var v3 = cooldown.textContent.trim().replace(/\s*to\s+next\s+claim\s*/i,'').trim();
+      if (/\d/.test(v3)) { t.beetleCatch = v3; }
     }
-    const huntCost=document.querySelector('.beetle-catch-module__hunt-button-cheese-cost');
+    var huntCost = document.querySelector('.beetle-catch-module__hunt-button-cheese-cost');
     if (huntCost) {
-      const txt=huntCost.textContent.trim();
+      var txt = huntCost.textContent.trim();
       if (/cooldown/i.test(txt)) {
-        const cleaned=txt.replace(/\s*cooldown\s*/i,'').trim();
-        if (/\d/.test(cleaned)) t.huntCooldown=cleaned;
-      } else if (/cheese/i.test(txt)) { t.huntCooldown='Ready!'; }
+        var cleaned = txt.replace(/\s*cooldown\s*/i,'').trim();
+        if (/\d/.test(cleaned)) { t.huntCooldown = cleaned; }
+      } else if (/cheese/i.test(txt)) { t.huntCooldown = 'Ready!'; }
     }
-    S.timers=t;
+    S.timers = t;
   }
   function parseHammer() {
-    const owned=[];
-    document.querySelectorAll('.crafting-module__hammer-row .crafting-module__hammer-slot').forEach(s => {
-      if (s.classList.contains('crafting-module__hammer-slot--undiscovered')) return;
-      const img=s.querySelector('.crafting-module__beetle-img'); if (!img) return;
-      const k=extractKey(img);
-      if (k&&k.startsWith('hammer_t')) owned.push(k);
+    var owned = [];
+    document.querySelectorAll('.crafting-module__hammer-row .crafting-module__hammer-slot').forEach(function(s) {
+      if (s.classList.contains('crafting-module__hammer-slot--undiscovered')) { return; }
+      var img = s.querySelector('.crafting-module__beetle-img'); if (!img) { return; }
+      var k = resolveItemKey(s, img);
+      if (k && k.indexOf('hammer_t') === 0) { owned.push(k); }
     });
-    owned.sort((a,b)=>HAMMER_TIERS.indexOf(b)-HAMMER_TIERS.indexOf(a));
-    S.ownedHammers=owned; S.currentHammer=owned[0]||null;
-    const st=S.currentHammer?HAMMER_STATS[S.currentHammer]:null;
-    S.currentHammerBonus=st?st.bonus:null; S.currentHammerBreakChance=st?st.baseBreak:null;
+    owned.sort(function(a,b) { return HAMMER_TIERS.indexOf(b) - HAMMER_TIERS.indexOf(a); });
+    S.ownedHammers = owned;
+    S.currentHammer = owned[0] || null;
+    var st = S.currentHammer ? HAMMER_STATS[S.currentHammer] : null;
+    S.currentHammerBonus = st ? st.bonus : null;
+    S.currentHammerBreakChance = st ? st.baseBreak : null;
   }
   function parseLevel() {
-    const el=document.querySelector('.beetle-card__level');
-    if (el) { const m=el.textContent.match(/(\d+)/); if(m) S.level=parseInt(m[1],10); }
+    var el = document.querySelector('.beetle-card__level');
+    if (el) { var m = el.textContent.match(/(\d+)/); if (m) { S.level = parseInt(m[1],10); } }
   }
   function parseCraftMode() {
-    const cm=document.querySelector('.crafting-module');
-    if (!cm) { S.craftMode=null; return; }
-    S.craftMode=cm.classList.contains('crafting-module--smash')?'Smash':'Assemble';
+    var cm = document.querySelector('.crafting-module');
+    if (!cm) { S.craftMode = null; return; }
+    S.craftMode = cm.classList.contains('crafting-module--smash') ? 'Smash' : 'Assemble';
   }
 
-  /* ─── Inventory Staleness ─── */
-  const STALE_THRESHOLD = 120000; // 2 minutes
+  /* ─── Staleness ─── */
   function isStale() { return !S.lastScanTime || (Date.now() - S.lastScanTime > STALE_THRESHOLD); }
   function scanAge() {
-    if (!S.lastScanTime) return 'never';
-    const s = Math.round((Date.now() - S.lastScanTime) / 1000);
-    if (s < 60) return s + 's ago';
-    return Math.round(s/60) + 'm ago';
+    if (!S.lastScanTime) { return 'never'; }
+    var s = Math.round((Date.now() - S.lastScanTime) / 1000);
+    if (s < 60) { return s + 's'; }
+    return Math.round(s/60) + 'm';
   }
 
-  /* ─── Smart Recommendations Engine ─── */
-  // Collection protection: never consume last copy of a collected beetle/flower
-  const COLLECTIBLES = new Set([...ALL_BEETLES, ...ALL_FLOWERS]);
+  /* ─── Recommendation Engine ─── */
   function wouldConsumeLastCollectible(recipe, inv) {
-    for (const token of recipe.inputs) {
-      const group = TOKEN_GROUPS[token];
+    for (var i = 0; i < recipe.inputs.length; i++) {
+      var token = recipe.inputs[i];
+      var group = TOKEN_GROUPS[token];
       if (group) {
-        // For group tokens, check which member would be consumed
-        for (const k of group) {
-          if ((inv[k]||0) > 0 && COLLECTIBLES.has(k) && (inv[k]||0) <= 1) {
-            return true; // Would consume last copy of a collectible
+        // FIX 3: Check if the member that WOULD be consumed is a singleton collectible
+        for (var gi = 0; gi < group.length; gi++) {
+          if ((inv[group[gi]]||0) > 0 && COLLECTIBLES.has(group[gi]) && (inv[group[gi]]||0) <= 1) {
+            // Check if there's a non-singleton alternative in the group
+            var hasAlt = false;
+            for (var ai = 0; ai < group.length; ai++) {
+              if (ai !== gi && (inv[group[ai]]||0) > 1) { hasAlt = true; break; }
+            }
+            if (!hasAlt) { return true; }
           }
         }
       } else if (COLLECTIBLES.has(token) && (inv[token]||0) <= 1) {
@@ -457,64 +530,65 @@
     return false;
   }
 
-  // Only recommend recipes where ALL ingredients exist AND won't destroy collection
   function getDirectCrafts(inv) {
-    const ht = S.ownedHammers.length ? Math.max(...S.ownedHammers.map(h=>HAMMER_TIERS.indexOf(h))) : -1;
-    return RECIPES.filter(r => {
-      if (r.label === 'Junk Cube') return false;
-      if (!canMake(r, inv)) return false;
-      // Filter owned hammers
-      const hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
+    var ht = S.ownedHammers.length ? Math.max.apply(null, S.ownedHammers.map(function(h) { return HAMMER_TIERS.indexOf(h); })) : -1;
+    return RECIPES.filter(function(r) {
+      if (r.label === 'Junk Cube') { return false; }
+      if (!canMake(r, inv)) { return false; }
+      var hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
         'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'}[r.label];
-      if (hk) { const ot = HAMMER_TIERS.indexOf(hk); if (ot<=ht||ot>ht+1) return false; }
-      // Don't suggest recipes that would consume last copy of a collectible
-      if (wouldConsumeLastCollectible(r, inv)) return false;
+      if (hk) { var ot = HAMMER_TIERS.indexOf(hk); if (ot<=ht||ot>ht+1) { return false; } }
+      if (wouldConsumeLastCollectible(r, inv)) { return false; }
       return true;
-    }).sort((a,b) => (RECIPE_VALUE[b.label]||5) - (RECIPE_VALUE[a.label]||5));
+    }).sort(function(a,b) { return (RECIPE_VALUE[b.label]||5) - (RECIPE_VALUE[a.label]||5); });
   }
 
-  // Consume items from a virtual inventory copy
+  /* ─── FIX 3: Smart group consumption (duplicates before singletons, non-collectibles first) ─── */
   function consumeInputs(vInv, recipe) {
-    const vi = Object.assign({}, vInv);
-    for (const token of recipe.inputs) {
-      const group = TOKEN_GROUPS[token];
+    var vi = Object.assign({}, vInv);
+    for (var i = 0; i < recipe.inputs.length; i++) {
+      var token = recipe.inputs[i];
+      var group = TOKEN_GROUPS[token];
       if (group) {
-        // Consume from the first available group member
-        for (const k of group) {
-          if ((vi[k]||0) > 0) { vi[k]--; break; }
-        }
+        // Sort group: prefer non-collectibles, then highest quantity, then non-singletons
+        var available = group.filter(function(k) { return (vi[k]||0) > 0; });
+        available.sort(function(a,b) {
+          var aCol = COLLECTIBLES.has(a) ? 1 : 0;
+          var bCol = COLLECTIBLES.has(b) ? 1 : 0;
+          if (aCol !== bCol) { return aCol - bCol; } // non-collectible first
+          return (vi[b]||0) - (vi[a]||0); // highest qty first (consume from abundance)
+        });
+        if (available.length > 0) { vi[available[0]]--; }
       } else {
-        if ((vi[token]||0) > 0) vi[token]--;
+        if ((vi[token]||0) > 0) { vi[token]--; }
       }
     }
     return vi;
   }
 
-  // Build top 3 action plans: direct crafts + 2-step chains with consumption
   function getActionPlans(inv) {
-    if (isStale()) return []; // Don't recommend on stale data
+    if (isStale()) { return []; }
+    var plans = [];
+    var directCrafts = getDirectCrafts(inv);
 
-    const plans = [];
-    const directCrafts = getDirectCrafts(inv);
-
-    // Phase 1: Direct crafts (all ingredients in hand)
-    for (const r of directCrafts) {
-      const value = RECIPE_VALUE[r.label] || 5;
-      const fragile = r.inputs.some(t => {
-        const group = TOKEN_GROUPS[t];
-        if (group) return cnt(inv, group) <= 1;
+    // Phase 1: Direct crafts
+    for (var di = 0; di < directCrafts.length; di++) {
+      var r = directCrafts[di];
+      var value = RECIPE_VALUE[r.label] || 5;
+      var fragile = r.inputs.some(function(t) {
+        var group = TOKEN_GROUPS[t];
+        if (group) { return cnt(inv, group) <= 1; }
         return (inv[t]||0) <= 1;
       });
       plans.push({
-        goal: r.label, value, type: 'direct', fragile,
+        goal: r.label, value: value, type: 'direct', fragile: fragile,
         steps: [{ label: r.label, inputs: r.inputs.map(tokHuman).join(' + '), ready: true }]
       });
     }
 
-    // Phase 2: 2-step chains (craft prereq → then craft goal)
-    // Only if prereq is directly craftable AND after consuming prereq inputs, goal is craftable
-    const ht = S.ownedHammers.length ? Math.max(...S.ownedHammers.map(h=>HAMMER_TIERS.indexOf(h))) : -1;
-    const PREREQ_MAP = {
+    // Phase 2: 2-step chains
+    var ht = S.ownedHammers.length ? Math.max.apply(null, S.ownedHammers.map(function(h) { return HAMMER_TIERS.indexOf(h); })) : -1;
+    var PREREQ_MAP = {
       'pollen_tin':['Tin Pollen'],'pollen_bronze':['Bronze Pollen'],
       'pollen_mithril':['Mithril Pollen'],'pollen_adamantine':['Adamantine Pollen'],
       'cattail':['Nectar / Cattail Bridge'],'nectar':['Nectar / Cattail Bridge'],
@@ -522,43 +596,34 @@
       'gunpowder':['Pinecone / Moss / Gunpowder Bridge'],
       'junk_cube_t1':['Junk Cube'],'junk_cube_t2':['Junk Tesseract']
     };
-
-    for (const recipe of RECIPES) {
-      if (recipe.label === 'Junk Cube') continue;
-      const hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
+    for (var ri = 0; ri < RECIPES.length; ri++) {
+      var recipe = RECIPES[ri];
+      if (recipe.label === 'Junk Cube') { continue; }
+      var hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
         'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'}[recipe.label];
-      if (hk) { const ot = HAMMER_TIERS.indexOf(hk); if (ot<=ht||ot>ht+1) continue; }
-      if (canMake(recipe, inv)) continue; // Already a direct craft, skip
-
-      // Find what's missing
-      const needed = {};
-      for (const t of recipe.inputs) needed[t] = (needed[t]||0) + 1;
-      const missing = [];
-      for (const [token, times] of Object.entries(needed)) {
-        const group = TOKEN_GROUPS[token];
-        const have = group ? cnt(inv, group) : (inv[token]||0);
-        if (have < times) missing.push(token);
+      if (hk) { var ot = HAMMER_TIERS.indexOf(hk); if (ot<=ht||ot>ht+1) { continue; } }
+      if (canMake(recipe, inv)) { continue; }
+      var needed = {};
+      for (var ni = 0; ni < recipe.inputs.length; ni++) { needed[recipe.inputs[ni]] = (needed[recipe.inputs[ni]]||0) + 1; }
+      var missing = [];
+      for (var token in needed) {
+        var group = TOKEN_GROUPS[token];
+        var have = group ? cnt(inv, group) : (inv[token]||0);
+        if (have < needed[token]) { missing.push(token); }
       }
-
-      // Only handle 1 missing ingredient (2-step chain)
-      if (missing.length !== 1) continue;
-      const missingToken = missing[0];
-      const prereqLabels = PREREQ_MAP[missingToken];
-      if (!prereqLabels) continue; // Can't craft this ingredient
-
-      for (const prereqLabel of prereqLabels) {
-        const prereq = RECIPES.find(x => x.label === prereqLabel);
-        if (!prereq || !canMake(prereq, inv)) continue;
-
-        // Collection protection: skip if prereq or goal would consume last collectible
-        if (wouldConsumeLastCollectible(prereq, inv)) continue;
-        // Simulate: consume prereq inputs, add output, check if goal is now craftable
-        let vInv = consumeInputs(inv, prereq);
+      if (missing.length !== 1) { continue; }
+      var missingToken = missing[0];
+      var prereqLabels = PREREQ_MAP[missingToken];
+      if (!prereqLabels) { continue; }
+      for (var pi = 0; pi < prereqLabels.length; pi++) {
+        var prereq = RECIPES.find(function(x) { return x.label === prereqLabels[pi]; });
+        if (!prereq || !canMake(prereq, inv)) { continue; }
+        if (wouldConsumeLastCollectible(prereq, inv)) { continue; }
+        var vInv = consumeInputs(inv, prereq);
         vInv[missingToken] = (vInv[missingToken]||0) + 1;
         if (canMake(recipe, vInv) && !wouldConsumeLastCollectible(recipe, vInv)) {
-          const value = RECIPE_VALUE[recipe.label] || 5;
           plans.push({
-            goal: recipe.label, value: value - 5, type: '2-step',
+            goal: recipe.label, value: (RECIPE_VALUE[recipe.label]||5) - 5, type: '2-step',
             steps: [
               { label: prereq.label, inputs: prereq.inputs.map(tokHuman).join(' + '), ready: true, note: prereq.type === 'smash' ? 'RNG' : null },
               { label: recipe.label, inputs: recipe.inputs.map(tokHuman).join(' + '), ready: false }
@@ -568,308 +633,266 @@
       }
     }
 
-    // Deduplicate: keep highest-value version of each goal
-    const seen = new Set();
-    const unique = [];
-    plans.sort((a,b) => b.value - a.value);
-    for (const p of plans) {
-      // Normalize goal name (strip alt/variant suffixes)
-      const base = p.goal.replace(/ \(alt\)$| \(Stag\)$| \(Bomb\)$/,'');
-      if (!seen.has(base)) {
-        seen.add(base);
-        unique.push(p);
-      }
+    // Deduplicate
+    var seen = {};
+    var unique = [];
+    plans.sort(function(a,b) { return b.value - a.value; });
+    for (var ui = 0; ui < plans.length; ui++) {
+      var base = plans[ui].goal.replace(/ \(alt\)$| \(Stag\)$| \(Bomb\)$/,'');
+      if (!seen[base]) { seen[base] = true; unique.push(plans[ui]); }
     }
 
-    // Cross-plan consumption check: deduct shared resources
-    const finalPlans = [];
-    let sharedInv = Object.assign({}, inv);
-    for (const plan of unique) {
-      // Verify all steps still work with shared inventory
-      let ok = true;
-      let testInv = Object.assign({}, sharedInv);
-      for (const step of plan.steps) {
-        const r = RECIPES.find(x => x.label === step.label);
-        if (!r || !canMake(r, testInv)) { ok = false; break; }
-        testInv = consumeInputs(testInv, r);
+    // Cross-plan consumption check
+    var finalPlans = [];
+    var sharedInv = Object.assign({}, inv);
+    for (var fi = 0; fi < unique.length; fi++) {
+      var plan = unique[fi];
+      var ok = true;
+      var testInv = Object.assign({}, sharedInv);
+      for (var si = 0; si < plan.steps.length; si++) {
+        var sr = RECIPES.find(function(x) { return x.label === plan.steps[si].label; });
+        if (!sr || !canMake(sr, testInv)) { ok = false; break; }
+        testInv = consumeInputs(testInv, sr);
       }
       if (ok) {
         finalPlans.push(plan);
-        // Deduct from shared inventory so next plan doesn't double-count
-        for (const step of plan.steps) {
-          const r = RECIPES.find(x => x.label === step.label);
-          if (r) sharedInv = consumeInputs(sharedInv, r);
+        for (var ci = 0; ci < plan.steps.length; ci++) {
+          var cr = RECIPES.find(function(x) { return x.label === plan.steps[ci].label; });
+          if (cr) { sharedInv = consumeInputs(sharedInv, cr); }
         }
       }
-      if (finalPlans.length >= 3) break;
+      if (finalPlans.length >= 3) { break; }
     }
-
     return finalPlans;
   }
 
-  /* ─── Auto-Claim / Hunt ─── */
-  let _lastClaimTime = 0, _lastHuntTime = 0;
+  /* ─── FIX 4: Auto-Claim / Hunt / Cheese with explicit logging ─── */
+  var _lastClaimTime = 0, _lastHuntTime = 0, _lastCheeseTime = 0;
   function tryAutoClaim() {
-    if (!S.autoClaim || _scanning) return;
-    if (Date.now() - _lastClaimTime < 30000) return;
-    const btn=document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
+    if (!S.autoClaim || _scanning) { return; }
+    if (Date.now() - _lastClaimTime < 30000) { return; }
+    var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
     if (btn) {
       btn.click(); _lastClaimTime = Date.now();
-      logEvent('Auto-claimed beetle! Waiting for reward...');
-      setTimeout(() => { logEvent('Post-claim scan'); fullScan(); }, 10000);
+      logEvent('Auto-claimed beetle! Waiting 10s for reward...');
+      setTimeout(function() { logEvent('Post-claim scan'); fullScan(); }, 10000);
     }
   }
   function tryAutoHunt() {
-    if (!S.autoHunt || _scanning) return;
-    if ((S.mergedInventory.cheese||0) < 100) return;
-    if (Date.now() - _lastHuntTime < 30000) return;
-    const btn=document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
+    if (!S.autoHunt || _scanning) { return; }
+    var cheese = S.mergedInventory.cheese || 0;
+    if (cheese < HUNT_COST) {
+      return; // Can't afford
+    }
+    if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) {
+      return; // Would breach reserve
+    }
+    if (Date.now() - _lastHuntTime < 30000) { return; }
+    var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
     if (btn) {
       btn.click(); _lastHuntTime = Date.now();
-      logEvent('Auto-hunted! (-20 cheese)');
-      setTimeout(() => { logEvent('Post-hunt scan'); fullScan(); }, 10000);
+      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese). Reserve preserved.');
+      setTimeout(function() { logEvent('Post-hunt scan'); fullScan(); }, 10000);
     }
   }
-
-  /* ─── Auto-Claim Daily Cheese ─── */
-  let _lastCheeseTime = 0;
   function tryClaimCheese() {
-    if (_scanning) return;
-    if (Date.now() - _lastCheeseTime < 60000) return; // Don't re-trigger within 60s
-    // Check nav bar for "ready" state
-    const navCheese = document.querySelector('.cheese-claim-nav .info');
-    if (!navCheese || !/ready/i.test(navCheese.textContent)) return;
-    // Find the claim button in the cheese module
-    const btn = document.querySelector('.claim-button:not(.disabled)');
+    if (_scanning) { return; }
+    if (Date.now() - _lastCheeseTime < 60000) { return; }
+    var navCheese = document.querySelector('.cheese-claim-nav .info');
+    if (!navCheese || !/ready/i.test(navCheese.textContent)) { return; }
+    var btn = document.querySelector('.claim-button:not(.disabled)');
     if (btn) {
-      btn.click();
-      _lastCheeseTime = Date.now();
+      btn.click(); _lastCheeseTime = Date.now();
       logEvent('Auto-claimed daily cheese!');
-      setTimeout(function() {
-        logEvent('Post-cheese scan');
-        fullScan();
-      }, 5000);
+      setTimeout(function() { logEvent('Post-cheese scan'); fullScan(); }, 5000);
     }
   }
 
-  /* ─── Styles ─── */
+  /* ─── FIX 5 + 6 + 7: Styles with status strip, freshness chip, timer badges, hammer honesty ─── */
   function injectStyles() {
-    if (document.getElementById(STYLE_ID)) return;
-    const s=document.createElement('style'); s.id=STYLE_ID;
-    s.textContent = `
-#${BTN_ID}{position:fixed;left:20px;bottom:20px;z-index:999999;padding:10px 14px;
-  background:#d7f4f7;color:#11383d;border:1px solid #9bd8e0;border-radius:12px;
-  font-weight:700;cursor:pointer;font-size:14px;}
-#${BTN_ID}:hover{background:#c0edf2;}
-#${PANEL_ID}{position:fixed;left:20px;top:60px;z-index:999999;width:340px;
-  background:#fff;border:2px solid #b8e6ec;border-radius:16px;padding:14px;
-  box-shadow:0 14px 40px rgba(0,0,0,.18);font-family:Arial,sans-serif;color:#163238;
-  max-height:calc(100vh - 80px);display:flex;flex-direction:column;gap:6px;overflow:hidden;}
-#${PANEL_ID}.hidden{display:none!important;}
-.bc7-header{display:flex;align-items:center;justify-content:space-between;}
-.bc7-title{font-size:20px;font-weight:800;}
-.bc7-lv{font-size:12px;color:#5a7379;font-weight:700;}
-.bc7-btns{display:flex;gap:4px;flex-wrap:wrap;}
-.bc7-btn{background:#d9f2f6;color:#17363b;border:1px solid #b8e6ec;border-radius:8px;
-  padding:5px 8px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;}
-.bc7-btn:hover{background:#c0edf2;}.bc7-btn.on{background:#17363b;color:#fff;}
-.bc7-card{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:10px;flex-shrink:0;}
-.bc7-scroll{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:10px;
-  overflow-y:auto;overflow-x:hidden;flex-shrink:1;flex-grow:0;min-height:40px;}
-.bc7-scroll::-webkit-scrollbar{width:5px;}
-.bc7-scroll::-webkit-scrollbar-thumb{background:#b8e6ec;border-radius:3px;}
-.bc7-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;font-size:12px;line-height:1.4;}
-.bc7-row-name{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px;}
-.bc7-h{font-weight:800;font-size:13px;margin-bottom:6px;color:#11383d;}
-.bc7-muted{color:#6b8a90;font-size:11px;}
-.bc7-tier{font-size:9px;font-weight:700;padding:1px 4px;border-radius:3px;color:#fff;flex-shrink:0;}
-.bc7-val{font-weight:700;text-align:right;white-space:nowrap;}
-.bc7-best-item{padding:4px 0;border-bottom:1px solid #e8f4f7;}
-.bc7-best-item:last-child{border-bottom:none;}
-.bc7-best-name{font-weight:800;font-size:14px;color:#11383d;}
-.bc7-recipe{padding:4px 0;border-bottom:1px solid #eef5f7;}
-.bc7-recipe:last-child{border-bottom:none;}
-.bc7-recipe-name{font-weight:700;font-size:12px;}
-.bc7-jd{font-size:10px;color:#8a9a9a;margin-left:4px;}
-.bc7-ready{color:#27ae60;font-weight:800;}
-.bc7-timer{color:#e67e22;font-weight:700;}
-.bc7-log-line{font-size:10px;color:#6b8a90;line-height:1.5;border-bottom:1px solid #f0f7f9;padding:1px 0;}
-.bc7-bar{display:flex;gap:3px;margin-bottom:6px;}
-    `;
+    if (document.getElementById(STYLE_ID)) { return; }
+    var s = document.createElement('style'); s.id = STYLE_ID;
+    s.textContent = [
+      '#',BTN_ID,'{position:fixed;left:20px;bottom:20px;z-index:999999;padding:10px 14px;background:#d7f4f7;color:#11383d;border:1px solid #9bd8e0;border-radius:12px;font-weight:700;cursor:pointer;font-size:14px;}',
+      '#',BTN_ID,':hover{background:#c0edf2;}',
+      '#',PANEL_ID,'{position:fixed;left:20px;top:50px;z-index:999999;width:350px;background:#fff;border:2px solid #b8e6ec;border-radius:16px;padding:14px;box-shadow:0 14px 40px rgba(0,0,0,.18);font-family:Arial,sans-serif;color:#163238;max-height:calc(100vh - 70px);display:flex;flex-direction:column;gap:5px;overflow:hidden;}',
+      '#',PANEL_ID,'.hidden{display:none!important;}',
+      '.bc8-header{display:flex;align-items:center;justify-content:space-between;}',
+      '.bc8-title{font-size:18px;font-weight:800;}',
+      '.bc8-sub{font-size:11px;color:#5a7379;font-weight:700;}',
+      '.bc8-btns{display:flex;gap:3px;flex-wrap:wrap;}',
+      '.bc8-btn{background:#d9f2f6;color:#17363b;border:1px solid #b8e6ec;border-radius:6px;padding:4px 7px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;}',
+      '.bc8-btn:hover{background:#c0edf2;}.bc8-btn.on{background:#17363b;color:#fff;}',
+      '.bc8-strip{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#f7fcfd;border:1px solid #e0f0f3;border-radius:8px;font-size:11px;flex-shrink:0;}',
+      '.bc8-strip-item{display:flex;align-items:center;gap:3px;}',
+      '.bc8-strip-label{color:#6b8a90;font-weight:600;}',
+      '.bc8-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:700;}',
+      '.bc8-ready{background:#d4edda;color:#155724;}.bc8-countdown{background:#fff3cd;color:#856404;}.bc8-stale{background:#f8d7da;color:#721c24;}.bc8-fresh-ok{background:#d4edda;color:#155724;}',
+      '.bc8-card{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:10px;flex-shrink:0;}',
+      '.bc8-focus{background:#f0f9fb;border:1px solid #b8e6ec;border-radius:10px;padding:12px;flex-shrink:0;}',
+      '.bc8-scroll{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:10px;overflow-y:auto;overflow-x:hidden;flex-shrink:1;flex-grow:0;min-height:30px;}',
+      '.bc8-scroll::-webkit-scrollbar{width:5px;}.bc8-scroll::-webkit-scrollbar-thumb{background:#b8e6ec;border-radius:3px;}',
+      '.bc8-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;font-size:11px;line-height:1.4;}',
+      '.bc8-row-name{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px;}',
+      '.bc8-h{font-weight:800;font-size:13px;margin-bottom:6px;color:#11383d;}',
+      '.bc8-muted{color:#6b8a90;font-size:10px;}',
+      '.bc8-tier{font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;color:#fff;flex-shrink:0;}',
+      '.bc8-val{font-weight:700;text-align:right;white-space:nowrap;font-size:11px;}',
+      '.bc8-best-item{padding:5px 0;border-bottom:1px solid #e8f4f7;}.bc8-best-item:last-child{border-bottom:none;}',
+      '.bc8-best-name{font-weight:800;font-size:14px;color:#11383d;}',
+      '.bc8-recipe{padding:3px 0;border-bottom:1px solid #eef5f7;}.bc8-recipe:last-child{border-bottom:none;}',
+      '.bc8-recipe-name{font-weight:700;font-size:11px;}',
+      '.bc8-jd{font-size:9px;color:#8a9a9a;margin-left:4px;}',
+      '.bc8-log-line{font-size:9px;color:#6b8a90;line-height:1.4;border-bottom:1px solid #f0f7f9;padding:1px 0;}'
+    ].join('');
     document.head.appendChild(s);
   }
 
   /* ─── Render ─── */
   function renderPanel() {
-    let panel=document.getElementById(PANEL_ID);
-    if (!panel || panel.classList.contains('hidden')) return;
-    const inv=S.mergedInventory||{};
-    const timers=S.timers||{};
-    const stale = isStale();
-    const plans = getActionPlans(inv);
-    const directCrafts = stale ? [] : getDirectCrafts(inv);
-    const fmtT = (v) => {
-      if (!v) return '<span class="bc7-muted">\u2014</span>';
-      if (/ready/i.test(v)) return '<span class="bc7-ready">Ready!</span>';
-      return '<span class="bc7-timer">'+v+'</span>';
+    var panel = document.getElementById(PANEL_ID);
+    if (!panel || panel.classList.contains('hidden')) { return; }
+    var inv = S.mergedInventory || {};
+    var timers = S.timers || {};
+    var stale = isStale();
+    var plans = getActionPlans(inv);
+    var directCrafts = stale ? [] : getDirectCrafts(inv);
+    var fmtT = function(v) {
+      if (!v) { return '\u2014'; }
+      if (/ready/i.test(v)) { return '<span class="bc8-badge bc8-ready">Ready</span>'; }
+      return '<span class="bc8-badge bc8-countdown">' + v + '</span>';
     };
 
-    let h='';
-    // Header
-    const cheeseStr = inv.cheese ? inv.cheese.toLocaleString() + ' \u{1F9C0}' : '';
-    h+=`<div class="bc7-header"><span class="bc7-title"><span id="bc7-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach</span>
-      <span class="bc7-lv">${S.level?'Lv.'+S.level:''}${cheeseStr?' \u00B7 '+cheeseStr:''}</span></div>`;
+    var h = '';
+    // Header with freshness chip
+    var cheeseStr = inv.cheese ? inv.cheese.toLocaleString() : '';
+    h += '<div class="bc8-header"><span class="bc8-title"><span id="bc8-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach</span>';
+    h += '<span class="bc8-sub">' + (S.level ? 'Lv.' + S.level : '') + (cheeseStr ? ' \u00B7 ' + cheeseStr + ' \u{1F9C0}' : '') + ' \u00B7 <span id="bc8-fresh" class="bc8-badge ' + (stale ? 'bc8-stale' : 'bc8-fresh-ok') + '">' + (stale ? 'STALE' : scanAge()) + '</span></span></div>';
 
     // Buttons
-    h+=`<div class="bc7-btns">
-      <button class="bc7-btn" id="bc7-fs">Full Scan</button>
-      <button class="bc7-btn ${S.autoClaim?'on':''}" id="bc7-ac">Claim ${S.autoClaim?'ON':'OFF'}</button>
-      <button class="bc7-btn ${S.autoHunt?'on':''}" id="bc7-ah">Hunt ${S.autoHunt?'ON':'OFF'}</button>
-      <button class="bc7-btn" id="bc7-mc">Miladychan</button>
-      <button class="bc7-btn" id="bc7-wk">Wiki</button>
-      <button class="bc7-btn" id="bc7-rst" style="color:#c0392b;border-color:#e6b0aa;">Reset</button></div>`;
+    h += '<div class="bc8-btns">';
+    h += '<button class="bc8-btn" id="bc8-fs">Full Scan</button>';
+    h += '<button class="bc8-btn ' + (S.autoClaim ? 'on' : '') + '" id="bc8-ac">Claim ' + (S.autoClaim ? 'ON' : 'OFF') + '</button>';
+    h += '<button class="bc8-btn ' + (S.autoHunt ? 'on' : '') + '" id="bc8-ah">Hunt ' + (S.autoHunt ? 'ON' : 'OFF') + '</button>';
+    h += '<button class="bc8-btn" id="bc8-mc">Miladychan</button>';
+    h += '<button class="bc8-btn" id="bc8-wk">Wiki</button>';
+    h += '<button class="bc8-btn" id="bc8-rst" style="color:#c0392b;border-color:#e6b0aa;">Reset</button>';
+    h += '</div>';
 
-    // Status
-    h+=`<div class="bc7-card"><div class="bc7-h">Status</div>
-      <div class="bc7-row"><div>Hammer</div><div class="bc7-val">${S.currentHammer?dn(S.currentHammer):'\u2014'}</div></div>
-      <div class="bc7-row"><div>Bonus / Break</div><div class="bc7-val">${S.currentHammerBonus!=null?'+'+S.currentHammerBonus+'% / '+S.currentHammerBreakChance+'%':'\u2014'}</div></div>
-      <div class="bc7-row"><div>Beetle Claim</div><div class="bc7-val" id="bc7-t-claim">${fmtT(timers.beetleCatch)}</div></div>
-      <div class="bc7-row"><div>Hunt Cooldown</div><div class="bc7-val" id="bc7-t-hunt">${fmtT(timers.huntCooldown)}</div></div>
-      <div class="bc7-row"><div>Daily Cheese</div><div class="bc7-val" id="bc7-t-cheese">${fmtT(timers.dailyCheese)}</div></div>
-      ${S.craftMode?`<div class="bc7-row"><div>Mode</div><div class="bc7-val">${S.craftMode}</div></div>`:''}
-      <div class="bc7-row"><div>Inventory</div><div class="bc7-val">${stale?'<span style="color:#e74c3c;font-weight:800">STALE</span>':'<span style="color:#27ae60">'+scanAge()+'</span>'}</div></div></div>`;
+    // FIX 5: Status strip (compact, not a card)
+    h += '<div class="bc8-strip">';
+    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Hammer:</span> ' + (S.currentHammer ? dn(S.currentHammer) : '\u2014') + '</div>';
+    // FIX 6: Hammer label honesty
+    if (S.currentHammerBonus != null) {
+      h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Base:</span> +' + S.currentHammerBonus + '% / ' + S.currentHammerBreakChance + '% break</div>';
+    }
+    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Claim:</span> <span id="bc8-t-claim">' + fmtT(timers.beetleCatch) + '</span></div>';
+    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Hunt:</span> <span id="bc8-t-hunt">' + fmtT(timers.huntCooldown) + '</span></div>';
+    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Cheese:</span> <span id="bc8-t-cheese">' + fmtT(timers.dailyCheese) + '</span></div>';
+    if (S.craftMode) { h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Mode:</span> ' + S.craftMode + '</div>'; }
+    h += '</div>';
 
     // Staleness warning
     if (stale) {
-      h+=`<div class="bc7-card" style="background:#fff3f3;border-color:#e6b0aa;">
-        <div style="color:#c0392b;font-weight:800;font-size:12px;">Inventory data is stale. Hit Full Scan for accurate recommendations.</div></div>`;
+      h += '<div style="background:#fff3f3;border:1px solid #e6b0aa;border-radius:8px;padding:6px;color:#c0392b;font-weight:800;font-size:11px;flex-shrink:0;">Inventory stale. Hit Full Scan.</div>';
     }
 
-    // Best moves (top 3 action plans)
-    h+=`<div class="bc7-card"><div class="bc7-h">Next moves</div>`;
+    // FIX 5: Next moves as visual focal point
+    h += '<div class="bc8-focus"><div class="bc8-h">Next moves</div>';
     if (!plans.length) {
-      if (stale) {
-        h+=`<div class="bc7-muted">Scan inventory first.</div>`;
-      } else {
-        h+=`<div class="bc7-muted">No craftable moves found. Farm more materials.</div>`;
-      }
+      h += '<div class="bc8-muted">' + (stale ? 'Scan inventory first.' : 'No craftable moves. Farm more materials.') + '</div>';
     } else {
-      plans.forEach((p,i) => {
-        const fragileTag = p.fragile ? ' <span style="color:#e67e22;font-size:10px;">(verify qty)</span>' : '';
-        h+=`<div class="bc7-best-item">
-          <div class="bc7-best-name">${i+1}. ${p.goal}${fragileTag}</div>`;
-        p.steps.forEach((step, si) => {
-          const check = step.ready ? '\u2705' : '\u{1F536}';
-          const rng = step.note === 'RNG' ? ' <span style="color:#e67e22;font-size:10px;">(RNG)</span>' : '';
+      for (var pi = 0; pi < plans.length; pi++) {
+        var p = plans[pi];
+        var fragileTag = p.fragile ? ' <span style="color:#e67e22;font-size:9px;">(verify qty)</span>' : '';
+        h += '<div class="bc8-best-item"><div class="bc8-best-name">' + (pi+1) + '. ' + p.goal + fragileTag + '</div>';
+        for (var si = 0; si < p.steps.length; si++) {
+          var step = p.steps[si];
+          var check = step.ready ? '\u2705' : '\u{1F536}';
+          var rng = (step.note === 'RNG') ? ' <span style="color:#e67e22;font-size:9px;">(RNG)</span>' : '';
           if (p.steps.length === 1) {
-            h+=`<div class="bc7-muted">${check} ${step.inputs}${rng}</div>`;
+            h += '<div class="bc8-muted">' + check + ' ' + step.inputs + rng + '</div>';
           } else {
-            h+=`<div class="bc7-muted">${check} Step ${si+1}: ${step.label} <span style="color:#9ab">(${step.inputs})</span>${rng}</div>`;
+            h += '<div class="bc8-muted">' + check + ' Step ' + (si+1) + ': ' + step.label + ' <span style="color:#9ab;">(' + step.inputs + ')</span>' + rng + '</div>';
           }
-        });
-        h+=`</div>`;
-      });
+        }
+        h += '</div>';
+      }
     }
-    h+=`</div>`;
+    h += '</div>';
 
-    // Progression tracker
-    const stage = getStage(inv);
-    const {next, goals} = getNextStageGoals(inv, stage);
-    h+=`<div class="bc7-card"><div class="bc7-h">Progression</div>
-      <div style="display:flex;gap:3px;margin-bottom:6px;">`;
-    for (let i=1;i<=7;i++) {
-      const color = i<=stage ? TIER_COLORS[['Tin','Bronze','Mithril','Adamantine','Rare','Epic','Legendary'][i-1]] : '#d5e8ec';
-      h+=`<div style="flex:1;height:6px;border-radius:3px;background:${color};" title="Stage ${i}"></div>`;
+    // Progression
+    var stage = getStage(inv);
+    var stageInfo = getNextStageGoals(inv, stage);
+    h += '<div class="bc8-card"><div class="bc8-h">Progression</div><div style="display:flex;gap:2px;margin-bottom:4px;">';
+    var stageColors = ['#7a8a7a','#b87333','#5b8dd9','#9b59b6','#e67e22','#e74c3c','#f1c40f'];
+    for (var si2 = 0; si2 < 7; si2++) {
+      h += '<div style="flex:1;height:5px;border-radius:3px;background:' + (si2 < stage ? stageColors[si2] : '#d5e8ec') + ';"></div>';
     }
-    h+=`</div><div class="bc7-row"><div>Stage ${stage} / 7</div><div class="bc7-val">${STAGES[stage-1]?STAGES[stage-1].name:'Starting'}</div></div>`;
-    if (next && goals.length) {
-      h+=`<div class="bc7-muted" style="margin-top:4px;">Next: <b>${next.name}</b> \u2014 ${next.desc}</div>`;
-      h+=`<div class="bc7-muted">Need: ${goals.join(', ')}</div>`;
-    } else if (stage >= 7) {
-      h+=`<div class="bc7-muted" style="margin-top:4px;">Endgame reached. Push for Hercules!</div>`;
+    h += '</div><div class="bc8-row"><div>Stage ' + stage + ' / 7</div><div class="bc8-val">' + (STAGES[stage-1] ? STAGES[stage-1].name : 'Starting') + '</div></div>';
+    if (stageInfo.next && stageInfo.goals.length) {
+      h += '<div class="bc8-muted">Next: <b>' + stageInfo.next.name + '</b> \u2014 Need: ' + stageInfo.goals.join(', ') + '</div>';
     }
-    h+=`</div>`;
+    h += '</div>';
 
-    // Collection tracker
-    const col = getCollection(inv);
-    h+=`<div class="bc7-card"><div class="bc7-h">Collection</div>
-      <div class="bc7-row"><div>Beetles</div><div class="bc7-val">${col.ownedB.length} / ${col.totalB}</div></div>
-      <div class="bc7-row"><div>Flowers</div><div class="bc7-val">${col.ownedF.length} / ${col.totalF}</div></div>`;
-    const allMissing = [...col.missingB.map(k=>dn(k)), ...col.missingF.map(k=>dn(k))];
-    if (allMissing.length && allMissing.length <= 10) {
-      h+=`<div class="bc7-muted" style="margin-top:4px;">Missing: ${allMissing.join(', ')}</div>`;
-    } else if (allMissing.length > 10) {
-      h+=`<div class="bc7-muted" style="margin-top:4px;">Missing ${allMissing.length} items</div>`;
+    // Collection
+    var col = getCollection(inv);
+    h += '<div class="bc8-card"><div class="bc8-h">Collection</div>';
+    h += '<div class="bc8-row"><div>Beetles</div><div class="bc8-val">' + col.ownedB.length + ' / ' + col.totalB + '</div></div>';
+    h += '<div class="bc8-row"><div>Flowers</div><div class="bc8-val">' + col.ownedF.length + ' / ' + col.totalF + '</div></div>';
+    var allMissing = col.missingB.map(dn).concat(col.missingF.map(dn));
+    if (allMissing.length > 0 && allMissing.length <= 12) {
+      h += '<div class="bc8-muted" style="margin-top:3px;">Missing: ' + allMissing.join(', ') + '</div>';
     }
-    h+=`</div>`;
+    h += '</div>';
 
-    // You can make (scrollable) - only direct crafts
-    h+=`<div class="bc7-scroll" style="max-height:140px;"><div class="bc7-h">You can make (${directCrafts.length})</div>`;
+    // You can make (scrollable)
+    h += '<div class="bc8-scroll" style="max-height:120px;"><div class="bc8-h">You can make (' + directCrafts.length + ')</div>';
     if (!directCrafts.length) {
-      h+=`<div class="bc7-muted">${stale ? 'Scan first.' : 'No recipes available.'}</div>`;
+      h += '<div class="bc8-muted">' + (stale ? 'Scan first.' : 'No recipes available.') + '</div>';
     } else {
-      directCrafts.forEach(r => {
-        h+=`<div class="bc7-recipe"><div class="bc7-recipe-name">${r.label}</div>
-          <div class="bc7-muted">${r.inputs.map(tokHuman).join(' + ')}</div></div>`;
-      });
+      for (var dci = 0; dci < directCrafts.length; dci++) {
+        var dc2 = directCrafts[dci];
+        h += '<div class="bc8-recipe"><div class="bc8-recipe-name">' + dc2.label + '</div><div class="bc8-muted">' + dc2.inputs.map(tokHuman).join(' + ') + '</div></div>';
+      }
     }
-    h+=`</div>`;
+    h += '</div>';
 
     // Inventory (scrollable)
-    h+=`<div class="bc7-scroll" style="max-height:250px;"><div class="bc7-h">Inventory</div>`;
-    const junkTotal=cnt(inv,ANY_JUNK); const junkTypes=ANY_JUNK.filter(k=>(inv[k]||0)>0).length;
-    const displayItems=Object.keys(inv).filter(k=>!JUNK_SET.has(k)&&!SKIP_DISPLAY.has(k)&&k!=='cheese')
-      .sort((a,b)=>(inv[b]||0)-(inv[a]||0));
-    displayItems.forEach(k => {
-      const tier=TIER_MAP[k];
-      const badge=tier?`<span class="bc7-tier" style="background:${TIER_COLORS[tier]||'#888'}">${tier}</span>`:'';
-      h+=`<div class="bc7-row"><div class="bc7-row-name">${dn(k)} ${badge}</div><div class="bc7-val">${inv[k]}</div></div>`;
-    });
-    if (junkTotal > 0) {
-      h+=`<div class="bc7-row"><div class="bc7-row-name">Junk Items <span class="bc7-tier" style="background:#888">Junk</span></div>
-        <div class="bc7-val">${junkTotal} <span class="bc7-jd">(${junkTypes} types)</span></div></div>`;
+    h += '<div class="bc8-scroll" style="max-height:200px;"><div class="bc8-h">Inventory</div>';
+    var junkTotal = cnt(inv, ANY_JUNK);
+    var junkTypes = ANY_JUNK.filter(function(k) { return (inv[k]||0) > 0; }).length;
+    var displayItems = Object.keys(inv).filter(function(k) { return !JUNK_SET.has(k) && !SKIP_DISPLAY.has(k) && k !== 'cheese'; })
+      .sort(function(a,b) { return (inv[b]||0) - (inv[a]||0); });
+    for (var ii = 0; ii < displayItems.length; ii++) {
+      var ik = displayItems[ii];
+      var tier = TIER_MAP[ik];
+      var badge = tier ? '<span class="bc8-tier" style="background:' + (TIER_COLORS[tier]||'#888') + '">' + tier + '</span>' : '';
+      h += '<div class="bc8-row"><div class="bc8-row-name">' + dn(ik) + ' ' + badge + '</div><div class="bc8-val">' + inv[ik] + '</div></div>';
     }
-    h+=`</div>`;
+    if (junkTotal > 0) {
+      h += '<div class="bc8-row"><div class="bc8-row-name">Junk Items <span class="bc8-tier" style="background:#888">Junk</span></div><div class="bc8-val">' + junkTotal + ' <span class="bc8-jd">(' + junkTypes + ' types)</span></div></div>';
+    }
+    h += '</div>';
 
-    // Activity Log (scrollable)
-    h+=`<div class="bc7-scroll" style="max-height:120px;flex:1;"><div class="bc7-h">Activity Log</div>
-      <div id="bc7-log">${S.log.slice().reverse().map(l=>'<div class="bc7-log-line">'+l+'</div>').join('')}</div></div>`;
+    // Activity Log
+    h += '<div class="bc8-scroll" style="max-height:90px;flex:1;"><div class="bc8-h">Log</div>';
+    h += '<div id="bc8-log">' + S.log.slice().reverse().map(function(l) { return '<div class="bc8-log-line">' + l + '</div>'; }).join('') + '</div></div>';
 
-    panel.innerHTML=h;
+    panel.innerHTML = h;
 
-    // Bind
-    document.getElementById('bc7-fs').addEventListener('click', function() {
-      fullScan();
+    // Bind buttons
+    document.getElementById('bc8-fs').addEventListener('click', function() { fullScan(); });
+    document.getElementById('bc8-ac').addEventListener('click', function() { S.autoClaim = !S.autoClaim; save(); renderPanel(); });
+    document.getElementById('bc8-ah').addEventListener('click', function() { S.autoHunt = !S.autoHunt; save(); renderPanel(); });
+    document.getElementById('bc8-mc').addEventListener('click', function() { window.open('https://boards.miladychan.org/v/324142','_blank'); });
+    document.getElementById('bc8-wk').addEventListener('click', function() { window.open('https://beetle.wiki/doku.php?id=start','_blank'); });
+    document.getElementById('bc8-rst').addEventListener('click', function() {
+      if (confirm('Clear all data and rescan?')) { resetStore(); fullScan(); }
     });
-    document.getElementById('bc7-ac').addEventListener('click', function() {
-      S.autoClaim = !S.autoClaim;
-      save();
-      renderPanel();
-    });
-    document.getElementById('bc7-ah').addEventListener('click', function() {
-      S.autoHunt = !S.autoHunt;
-      save();
-      renderPanel();
-    });
-    document.getElementById('bc7-mc').addEventListener('click', function() {
-      window.open('https://boards.miladychan.org/v/324142', '_blank');
-    });
-    document.getElementById('bc7-wk').addEventListener('click', function() {
-      window.open('https://beetle.wiki/doku.php?id=start', '_blank');
-    });
-    document.getElementById('bc7-rst').addEventListener('click', function() {
-      if (confirm('Clear all data and rescan?')) {
-        resetStore();
-        fullScan();
-      }
-    });
-    document.getElementById('bc7-minimize').addEventListener('click', function() {
+    document.getElementById('bc8-minimize').addEventListener('click', function() {
       var p = document.getElementById(PANEL_ID);
-      if (p) {
-        p.classList.add('hidden');
-        S.panelOpen = false;
-        save();
-      }
+      if (p) { p.classList.add('hidden'); S.panelOpen = false; save(); }
     });
   }
 
@@ -877,47 +900,49 @@
   function ensureUI() {
     injectStyles();
     if (!document.getElementById(BTN_ID)) {
-      const btn=document.createElement('button'); btn.id=BTN_ID;
-      btn.textContent='\u{1FAB2} Beetle Coach';
-      btn.addEventListener('click',() => {
-        let p=document.getElementById(PANEL_ID);
-        if (!p) { p=document.createElement('div'); p.id=PANEL_ID; document.body.appendChild(p); }
+      var btn = document.createElement('button'); btn.id = BTN_ID;
+      btn.textContent = '\u{1FAB2} Beetle Coach';
+      btn.addEventListener('click', function() {
+        var p = document.getElementById(PANEL_ID);
+        if (!p) { p = document.createElement('div'); p.id = PANEL_ID; document.body.appendChild(p); }
         p.classList.toggle('hidden');
-        S.panelOpen=!p.classList.contains('hidden'); save();
+        S.panelOpen = !p.classList.contains('hidden'); save();
         if (S.panelOpen) { parseTimers(); renderPanel(); }
       });
       document.body.appendChild(btn);
     }
     if (!document.getElementById(PANEL_ID)) {
-      const p=document.createElement('div'); p.id=PANEL_ID;
-      if (!S.panelOpen) p.classList.add('hidden');
+      var p = document.createElement('div'); p.id = PANEL_ID;
+      if (!S.panelOpen) { p.classList.add('hidden'); }
       document.body.appendChild(p);
     }
   }
 
   /* ─── Boot ─── */
-  let _booted = false;
-  let _intervals = [];
+  var _booted = false;
+  var _intervals = [];
   function boot() {
-    if (_booted) return; _booted = true;
-    // Clear any existing intervals from previous boot cycles
-    _intervals.forEach(id => clearInterval(id));
+    if (_booted) { return; }
+    _booted = true;
+    _intervals.forEach(function(id) { clearInterval(id); });
     _intervals = [];
     ensureUI();
     fullScan();
-    _intervals.push(setInterval(refreshTimers, 5000));
-    _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, 10000));
-    console.log('[BeetleCoach v8.1] booted');
+    _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
+    _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
+    _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
+    console.log('[BeetleCoach v8.2] booted');
   }
-  function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail',e); } }
-  if (document.readyState==='complete'||document.readyState==='interactive') {
-    setTimeout(safeBoot,1500);
+  function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    setTimeout(safeBoot, 1500);
   } else {
-    window.addEventListener('load',()=>setTimeout(safeBoot,1500));
+    window.addEventListener('load', function() { setTimeout(safeBoot, 1500); });
   }
-  setTimeout(safeBoot,3000); setTimeout(safeBoot,5000);
-  const obs=new MutationObserver(()=>{
-    if (!document.getElementById(BTN_ID)) { _booted=false; setTimeout(safeBoot,500); }
+  setTimeout(safeBoot, 3000);
+  setTimeout(safeBoot, 5000);
+  var obs = new MutationObserver(function() {
+    if (!document.getElementById(BTN_ID)) { _booted = false; setTimeout(safeBoot, 500); }
   });
-  obs.observe(document.documentElement,{childList:true,subtree:true});
+  obs.observe(document.documentElement, {childList:true, subtree:true});
 })();
