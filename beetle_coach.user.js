@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      10.1.0
+// @version      10.2.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '10.1.0';
+  const CURRENT_VER = '10.2.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -637,7 +637,11 @@
     S.currentHammer = owned[0] || null;
     var st = S.currentHammer ? HAMMER_STATS[S.currentHammer] : null;
     S.currentHammerBonus = st ? st.bonus : null;
-    S.currentHammerBreakChance = st ? st.baseBreak : null;
+    // Only reset break chance to base if we DON'T have a live reading
+    if (!S.hammerBreakIsLive || S.currentHammer !== S._lastProbedHammer) {
+      S.currentHammerBreakChance = st ? st.baseBreak : null;
+      S.hammerBreakIsLive = false;
+    }
     // Try to read live break% — only if crafting module visible and not probed recently
     var shouldProbe = S.currentHammer && owned.length > 0 && (!S._lastHammerProbe || Date.now() - S._lastHammerProbe > 60000);
     if (shouldProbe && document.querySelector('.crafting-module')) {
@@ -654,6 +658,7 @@
           if (curM) {
             S.currentHammerBreakChance = parseInt(curM[1]);
             S.hammerBreakIsLive = true;
+            S._lastProbedHammer = S.currentHammer;
             save();
             // Update UI in-place
             var el = document.getElementById('bc8-hammer-break');
@@ -860,9 +865,9 @@
     {key:'goliath',recipe:'Goliath Beetle',prereqs:['pinecone'],via:'Mithril Bridge for Pinecone'},
     {key:'stag',recipe:'Stag Beetle',prereqs:['moss'],via:'Mithril Bridge for Moss'},
     {key:'bombardier',recipe:'Bombardier Beetle',prereqs:['gunpowder'],via:'Mithril Bridge for Gunpowder'},
-    // Flowers as explicit goals
-    {key:'gazania',recipe:'Bronze Flower Transmute',prereqs:[],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
-    {key:'pincushion',recipe:'Bronze Flower Transmute',prereqs:[],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
+    // Adamantine flowers — need Adamantine beetle + transmute, or flower tier-up
+    {key:'gazania',recipe:null,prereqs:['goliath'],via:'Transmute: Green + Goliath/Stag/Bombardier + Junk Cube (RNG)'},
+    {key:'pincushion',recipe:null,prereqs:['goliath'],via:'Transmute: Green + Goliath/Stag/Bombardier + Junk Cube (RNG)'},
     // Epic beetles
     {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','goliath'],via:'Gazania + Adamantine beetle'},
     // Endgame
@@ -1072,13 +1077,8 @@
     }, delay);
   }
 
-  function ensureBeetleCartridge() {
-    if (window.location.href.indexOf('cartridge=beetle') === -1) {
-      logEvent('Navigating to beetle cartridge...');
-      window.location.href = 'https://www.remilia.net/home?cartridge=beetle';
-      return false; // Not ready yet, will retry after page load
-    }
-    return true;
+  function onBeetleCartridge() {
+    return window.location.href.indexOf('cartridge=beetle') > -1;
   }
 
   function tryAutoClaim() {
@@ -1088,7 +1088,7 @@
     var navBC = document.querySelector('.beetle-game-nav .info');
     if (!navBC || !/ready/i.test(navBC.textContent)) { return; }
     // Navigate to beetle cartridge if needed
-    if (!ensureBeetleCartridge()) { return; }
+    if (!onBeetleCartridge()) { return; }
     var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
@@ -1107,7 +1107,7 @@
     if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return; }
     if (Date.now() - _lastHuntTime < 15000) { return; }
     // Navigate to beetle cartridge if needed
-    if (!ensureBeetleCartridge()) { return; }
+    if (!onBeetleCartridge()) { return; }
     var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
@@ -1461,7 +1461,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v10.1] booted');
+    console.log('[BeetleCoach v10.2] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
