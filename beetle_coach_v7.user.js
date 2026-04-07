@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.6.0
+// @version      8.7.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '8.6.0';
+  const CURRENT_VER = '8.7.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -112,6 +112,37 @@
     hammer_t5:{bonus:90,baseBreak:1}
   };
   const HAMMER_TIERS = ['hammer_t1','hammer_t2','hammer_t3','hammer_t4','hammer_t5'];
+  // Recommend appropriate hammer for a recipe based on its value
+  // Don't risk expensive hammers on cheap crafts
+  function recommendHammer(recipeLabel, ownedHammers) {
+    var value = RECIPE_VALUE[recipeLabel] || 5;
+    // Map value ranges to minimum hammer tier worth risking
+    // Low value (1-20): use cheapest available
+    // Mid value (21-50): use Bronze or Mithril
+    // High value (51-75): use Mithril or Adamantine
+    // Endgame (76+): use Adamantine or Diamond
+    var candidates = ownedHammers.slice().sort(function(a,b) {
+      return HAMMER_TIERS.indexOf(a) - HAMMER_TIERS.indexOf(b);
+    });
+    if (!candidates.length) { return null; }
+    if (value <= 20) { return candidates[0]; } // Cheapest available
+    if (value <= 50) {
+      // Use Bronze+ if available, otherwise cheapest
+      for (var i = 0; i < candidates.length; i++) {
+        if (HAMMER_TIERS.indexOf(candidates[i]) >= 1) { return candidates[i]; }
+      }
+      return candidates[0];
+    }
+    if (value <= 75) {
+      // Use Mithril+ if available
+      for (var i2 = 0; i2 < candidates.length; i2++) {
+        if (HAMMER_TIERS.indexOf(candidates[i2]) >= 2) { return candidates[i2]; }
+      }
+      return candidates[candidates.length - 1]; // Best available
+    }
+    // Endgame: use best available
+    return candidates[candidates.length - 1];
+  }
   const TOKEN_GROUPS = {
     any_junk:ANY_JUNK, any_tin_flower:TIN_FLOWERS, any_bronze_flower:BRONZE_FLOWERS,
     any_mithril_flower:MITHRIL_FLOWERS, any_adamantine_flower:ADAMANTINE_FLOWERS,
@@ -610,10 +641,14 @@
     return RECIPES.filter(function(r) {
       if (r.label === 'Junk Cube') { return false; }
       if (!canMake(r, inv)) { return false; }
-      // Hammer filter
+      // Hammer filter: skip owned tiers, but ALLOW re-crafting broken hammers
       var hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
         'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'}[r.label];
-      if (hk) { var ot = HAMMER_TIERS.indexOf(hk); if (ot<=ht||ot>ht+1) { return false; } }
+      if (hk) {
+        var isBroken = S.brokenHammers && S.brokenHammers.indexOf(hk) > -1;
+        var ot = HAMMER_TIERS.indexOf(hk);
+        if (!isBroken && (ot<=ht||ot>ht+1)) { return false; }
+      }
       // Don't recommend crafting a beetle/flower you already own
       // UNLESS it's needed as an ingredient for a higher recipe
       var outputKey = RECIPE_OUTPUT[r.label];
@@ -706,7 +741,11 @@
       if (recipe.label === 'Junk Cube') { continue; }
       var hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
         'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'}[recipe.label];
-      if (hk) { var ot = HAMMER_TIERS.indexOf(hk); if (ot<=ht||ot>ht+1) { continue; } }
+      if (hk) {
+        var isBroken2 = S.brokenHammers && S.brokenHammers.indexOf(hk) > -1;
+        var ot = HAMMER_TIERS.indexOf(hk);
+        if (!isBroken2 && (ot<=ht||ot>ht+1)) { continue; }
+      }
       // Skip already-owned outputs (same filter as getDirectCrafts)
       var outputKey2 = RECIPE_OUTPUT[recipe.label];
       if (outputKey2 && COLLECTIBLES.has(outputKey2) && (inv[outputKey2]||0) > 0) {
@@ -1001,7 +1040,12 @@
       for (var dci = 0; dci < directCrafts.length; dci++) {
         var dc2 = directCrafts[dci];
         var craftBadge = dc2.type === 'assemble' ? '<span class="bc8-badge bc8-fresh-ok" style="margin-left:4px;">SAFE</span>' : '<span class="bc8-badge bc8-countdown" style="margin-left:4px;">RNG</span>';
-        h += '<div class="bc8-recipe"><div class="bc8-recipe-name">' + dc2.label + craftBadge + '</div><div class="bc8-muted">' + dc2.inputs.map(tokHuman).join(' + ') + '</div></div>';
+        var hammerRec = '';
+        if (dc2.type === 'smash') {
+          var rec = recommendHammer(dc2.label, S.ownedHammers || []);
+          if (rec) { hammerRec = ' <span class="bc8-muted">Use: ' + dn(rec) + '</span>'; }
+        }
+        h += '<div class="bc8-recipe"><div class="bc8-recipe-name">' + dc2.label + craftBadge + '</div><div class="bc8-muted">' + dc2.inputs.map(tokHuman).join(' + ') + hammerRec + '</div></div>';
       }
     }
     h += '</div>';
@@ -1129,7 +1173,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v8.6] booted');
+    console.log('[BeetleCoach v8.7] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
