@@ -1,5 +1,5 @@
 # BeetleBoy / BeetleCraft — Known Recipes, Facts & Coach Reference
-_Last updated: 2026-04-07 (v9.2 — goal-directed progression engine, inventory export)_
+_Last updated: 2026-04-07 (v10.3 — live hammer break%, strategy toggle, flower transmutation, smart navigation)_
 
 This is the clean human-readable recipe and mechanics text file for future AI chats and personal reference.
 
@@ -485,16 +485,18 @@ Note: Christmas Beetle is a special seasonal beetle.
 
 ---
 
-## 20. Beetle Coach Tampermonkey script (v8.7)
+## 20. Beetle Coach Tampermonkey script (v10.3)
 
 The companion script is `beetle_coach.user.js` in this directory.
 GitHub: https://github.com/MeridianAnalytics/BeetleCoach
 
 ### Core automation
-- Auto-claim beetle every 2 hours (60s debounce, 12s post-action rescan)
-- Auto-hunt beetle (90s debounce, costs 20 cheese, 100 cheese reserve)
+- Auto-claim beetle every 2 hours (30s debounce, 12s post-action rescan)
+- Auto-hunt beetle (15s debounce, costs 20 cheese, 100 cheese reserve)
 - Auto-claim daily cheese
-- Post-action in-script refresh (parseTimers + fullScan, no page reload)
+- Smart navigation: auto-navigates to beetle cartridge when claim/hunt ready
+- Post-action hybrid refresh: immediate passiveScan + delayed fullScan 30s later
+- Strategy toggle: Endgame (Mars Rhino path) or Broad (collect everything)
 
 ### Scanning
 - Layered item extraction: background-image → img src → alt/title
@@ -513,6 +515,8 @@ GitHub: https://github.com/MeridianAnalytics/BeetleCoach
 - SAFE/RNG badges on craftable recipes
 
 ### Hammer intelligence
+- Live break% from game tooltip: hovers hammer slot, reads CURRENT BREAK CHANCE
+- Persists live reading until hammer changes (not overwritten by refreshTimers)
 - Real DOM state detection: owned / broken / undiscovered via CSS classes
 - Hammer recommendation per recipe based on value (cheap hammer for low-value, premium for high-value)
 - Broken hammer re-craft suggestions

@@ -1,5 +1,5 @@
 # BeetleBoy / BeetleCraft — Mathematical Value Model
-_Last updated: 2026-04-07 (v8.7 — hammer intelligence, corrected pollen types)_
+_Last updated: 2026-04-07 (v10.3 — live hammer break%, strategy toggle, flower transmutation)_
 
 ## Methodology
 
