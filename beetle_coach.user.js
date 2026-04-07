@@ -1072,16 +1072,30 @@
     }, delay);
   }
 
+  function ensureBeetleCartridge() {
+    if (window.location.href.indexOf('cartridge=beetle') === -1) {
+      logEvent('Navigating to beetle cartridge...');
+      window.location.href = 'https://www.remilia.net/home?cartridge=beetle';
+      return false; // Not ready yet, will retry after page load
+    }
+    return true;
+  }
+
   function tryAutoClaim() {
     if (!S.autoClaim || _scanning) { return; }
-    if (Date.now() - _lastClaimTime < 30000) { return; } // 30s debounce
+    if (Date.now() - _lastClaimTime < 30000) { return; }
+    // Check if beetle claim is ready (nav shows "ready")
+    var navBC = document.querySelector('.beetle-game-nav .info');
+    if (!navBC || !/ready/i.test(navBC.textContent)) { return; }
+    // Navigate to beetle cartridge if needed
+    if (!ensureBeetleCartridge()) { return; }
     var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
       if (/\d+[mhMs]\s/i.test(btnText)) { return; }
       btn.click(); _lastClaimTime = Date.now();
       S.session.claims++;
-      logEvent('Auto-claimed beetle! Refreshing in 12s...');
+      logEvent('Auto-claimed beetle!');
       save();
       postActionRefresh('Post-claim', 12000);
     }
@@ -1091,14 +1105,16 @@
     var cheese = S.mergedInventory.cheese || 0;
     if (cheese < HUNT_COST) { return; }
     if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return; }
-    if (Date.now() - _lastHuntTime < 15000) { return; } // 15s between hunts — game processes fast
+    if (Date.now() - _lastHuntTime < 15000) { return; }
+    // Navigate to beetle cartridge if needed
+    if (!ensureBeetleCartridge()) { return; }
     var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
       if (/cooldown/i.test(btnText)) { return; }
       btn.click(); _lastHuntTime = Date.now();
       S.session.hunts++;
-      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese). Refreshing in 8s...');
+      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese)');
       save();
       postActionRefresh('Post-hunt', 8000);
     }
