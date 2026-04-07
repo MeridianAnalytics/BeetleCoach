@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      10.3.0
+// @version      10.4.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '10.3.0';
+  const CURRENT_VER = '10.4.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -114,41 +114,46 @@
   const HAMMER_TIERS = ['hammer_t1','hammer_t2','hammer_t3','hammer_t4','hammer_t5'];
   // Recommend appropriate hammer for a recipe based on its value
   // Don't risk expensive hammers on cheap crafts
-  function recommendHammer(recipeLabel, ownedHammers) {
+  function recommendHammer(recipeLabel, ownedHammers, recipeType) {
     var value = RECIPE_VALUE[recipeLabel] || 5;
-    // Map value ranges to minimum hammer tier worth risking
-    // Low value (1-20): use cheapest available
-    // Mid value (21-50): use Bronze or Mithril
-    // High value (51-75): use Mithril or Adamantine
-    // Endgame (76+): use Adamantine or Diamond
     var candidates = ownedHammers.slice().sort(function(a,b) {
       return HAMMER_TIERS.indexOf(a) - HAMMER_TIERS.indexOf(b);
     });
     if (!candidates.length) { return null; }
-    if (value <= 20) { return candidates[0]; } // Cheapest available
-    if (value <= 50) {
-      // Use Bronze+ if available, otherwise cheapest
-      for (var i = 0; i < candidates.length; i++) {
-        if (HAMMER_TIERS.indexOf(candidates[i]) >= 1) { return candidates[i]; }
-      }
-      return candidates[0];
+
+    // Assemble recipes are 100% success — always use cheapest hammer (no risk)
+    if (recipeType === 'assemble') { return candidates[0]; }
+
+    // Smash recipes: balance bonus vs break risk vs recipe value
+    // Score each hammer: higher = better choice for this recipe
+    var best = null;
+    var bestScore = -999;
+    for (var hi = 0; hi < candidates.length; hi++) {
+      var h = candidates[hi];
+      var stats = HAMMER_STATS[h];
+      if (!stats) { continue; }
+      var tier = HAMMER_TIERS.indexOf(h);
+      var breakPct = stats.baseBreak;
+      // Use live break% if available for current hammer
+      if (h === S.currentHammer && S.hammerBreakIsLive) { breakPct = S.currentHammerBreakChance || stats.baseBreak; }
+      var bonus = stats.bonus;
+      // Replacement cost (base units from value model)
+      var replaceCost = [4, 13, 33, 159, 1395][tier] || 0;
+
+      // EV calculation: bonus gain vs break risk
+      // Score = (bonus contribution to recipe value) - (break probability * replacement cost)
+      var bonusGain = value * (bonus / 100);
+      var breakLoss = (breakPct / 100) * replaceCost;
+      var score = bonusGain - breakLoss;
+
+      // Penalty: don't use Diamond unless value >= 90
+      if (h === 'hammer_t5' && value < 90) { score -= 50; }
+      // Bonus: Adamantine is the sweet spot for most high-value crafts
+      if (h === 'hammer_t4' && value >= 40) { score += 5; }
+
+      if (score > bestScore) { bestScore = score; best = h; }
     }
-    if (value <= 75) {
-      // Use Mithril+ if available
-      for (var i2 = 0; i2 < candidates.length; i2++) {
-        if (HAMMER_TIERS.indexOf(candidates[i2]) >= 2) { return candidates[i2]; }
-      }
-      return candidates[candidates.length - 1]; // Best available
-    }
-    // Endgame (76+): prefer Adamantine over Diamond for most recipes
-    // Diamond has 9% break after first use — only worth it for 90+ value
-    for (var i3 = 0; i3 < candidates.length; i3++) {
-      if (HAMMER_TIERS.indexOf(candidates[i3]) >= 3) { // Adamantine+
-        // If Adamantine available and value < 90, use Adamantine (not Diamond)
-        if (candidates[i3] === 'hammer_t4' || value < 90) { return candidates[i3]; }
-      }
-    }
-    return candidates[candidates.length - 1];
+    return best || candidates[0];
   }
   const TOKEN_GROUPS = {
     any_junk:ANY_JUNK, any_tin_flower:TIN_FLOWERS, any_bronze_flower:BRONZE_FLOWERS,
@@ -877,46 +882,74 @@
   ];
 
   // Find the NEXT progression goal and what concrete step advances it
+  var PREREQ_RECIPES = {
+    'pinecone':'Pinecone / Moss / Gunpowder Bridge','moss':'Pinecone / Moss / Gunpowder Bridge',
+    'gunpowder':'Pinecone / Moss / Gunpowder Bridge',
+    'nectar':'Nectar / Cattail Bridge','cattail':'Nectar / Cattail Bridge',
+    'pollen_tin':'Tin Pollen','pollen_bronze':'Bronze Pollen',
+    'pollen_mithril':'Mithril Pollen','pollen_adamantine':'Adamantine Pollen'
+  };
+
+  // Score all progression goals and return the best actionable one
   function getProgressionMove(inv) {
     var chain = (S.strategy === 'broad') ? BROAD_CHAIN : ENDGAME_CHAIN;
+    var candidates = []; // {score, type, goal, label, reason, ...}
+    var bestBlocked = null;
+
     for (var ci = 0; ci < chain.length; ci++) {
       var goal = chain[ci];
-      if ((inv[goal.key]||0) > 0) { continue; } // Already have this
+      if ((inv[goal.key]||0) > 0) { continue; }
 
-      // Check which prereqs are missing
       var missingPrereqs = [];
       for (var pi = 0; pi < goal.prereqs.length; pi++) {
         if (!(inv[goal.prereqs[pi]]||0)) { missingPrereqs.push(goal.prereqs[pi]); }
       }
 
-      if (missingPrereqs.length === 0 && canMake(RECIPES.find(function(r){return r.label===goal.recipe;})||{inputs:[]}, inv)) {
-        // Can craft the goal directly!
-        return {type:'direct', goal:goal.key, label:goal.recipe, reason:'Progression: craft ' + dn(goal.key)};
-      }
+      var goalValue = RECIPE_VALUE[goal.recipe] || 30;
 
-      // Find a craftable step that produces a missing prereq
-      for (var mi = 0; mi < missingPrereqs.length; mi++) {
-        var needed = missingPrereqs[mi];
-        var PREREQ_RECIPES = {
-          'pinecone':'Pinecone / Moss / Gunpowder Bridge','moss':'Pinecone / Moss / Gunpowder Bridge',
-          'gunpowder':'Pinecone / Moss / Gunpowder Bridge',
-          'nectar':'Nectar / Cattail Bridge','cattail':'Nectar / Cattail Bridge',
-          'pollen_tin':'Tin Pollen','pollen_bronze':'Bronze Pollen',
-          'pollen_mithril':'Mithril Pollen','pollen_adamantine':'Adamantine Pollen'
-        };
-        var prereqLabel = PREREQ_RECIPES[needed];
-        if (prereqLabel) {
-          var prereqRecipe = RECIPES.find(function(r){return r.label===prereqLabel;});
-          if (prereqRecipe && canMake(prereqRecipe, inv) && !wouldConsumeLastCollectible(prereqRecipe, inv)) {
-            return {type:'prereq', goal:goal.key, label:prereqLabel, reason:'For ' + dn(goal.key) + ': craft ' + prereqLabel, target:goal.recipe, produces:needed};
-          }
+      // Can craft directly?
+      if (missingPrereqs.length === 0 && goal.recipe) {
+        var directRecipe = RECIPES.find(function(r) { return r.label === goal.recipe; });
+        if (directRecipe && canMake(directRecipe, inv) && !wouldConsumeLastCollectible(directRecipe, inv)) {
+          // Direct craft: highest priority (score = value + 100)
+          candidates.push({score: goalValue + 100, type:'direct', goal:goal.key, label:goal.recipe, reason:'Craft ' + dn(goal.key)});
+          continue;
         }
       }
 
-      // Can't advance this goal right now — report what's blocking
-      return {type:'blocked', goal:goal.key, label:goal.recipe, reason:'Need: ' + missingPrereqs.map(dn).join(', '), via:goal.via};
+      // Can craft a prereq?
+      var foundPrereq = false;
+      for (var mi = 0; mi < missingPrereqs.length; mi++) {
+        var prereqLabel = PREREQ_RECIPES[missingPrereqs[mi]];
+        if (!prereqLabel) { continue; }
+        var prereqRecipe = RECIPES.find(function(r) { return r.label === prereqLabel; });
+        if (prereqRecipe && canMake(prereqRecipe, inv) && !wouldConsumeLastCollectible(prereqRecipe, inv)) {
+          // Prereq craft: score = goal value + proximity bonus (fewer missing = closer)
+          var proximity = goal.prereqs.length - missingPrereqs.length;
+          candidates.push({
+            score: goalValue + (proximity * 10),
+            type:'prereq', goal:goal.key, label:prereqLabel,
+            reason:'For ' + dn(goal.key) + ': craft ' + prereqLabel,
+            target:goal.recipe, produces:missingPrereqs[mi]
+          });
+          foundPrereq = true;
+          break; // One prereq per goal is enough
+        }
+      }
+
+      // Blocked — remember the highest-value blocked goal
+      if (!foundPrereq && !bestBlocked) {
+        bestBlocked = {type:'blocked', goal:goal.key, label:goal.recipe,
+          reason:'Need: ' + missingPrereqs.map(dn).join(', '), via:goal.via};
+      }
     }
-    return null; // All goals complete!
+
+    // Return best candidate by score, or blocked if nothing is actionable
+    if (candidates.length > 0) {
+      candidates.sort(function(a,b) { return b.score - a.score; });
+      return candidates[0];
+    }
+    return bestBlocked;
   }
 
   function getActionPlans(inv) {
@@ -1245,7 +1278,7 @@
     }
 
     // FIX 5: Next moves as visual focal point
-    h += '<div class="bc8-focus"><div class="bc8-h">Next moves</div>';
+    h += '<div class="bc8-focus"><div class="bc8-h">Next moves <span class="bc8-badge ' + (S.strategy==='endgame'?'bc8-countdown':'bc8-fresh-ok') + '" style="font-size:8px;">' + (S.strategy==='endgame'?'ENDGAME':'BROAD') + '</span></div>';
     if (!plans.length) {
       h += '<div class="bc8-muted">' + (stale ? 'Scan inventory first.' : 'No craftable moves. Farm more materials.') + '</div>';
     } else {
@@ -1308,7 +1341,7 @@
         var craftBadge = dc2.type === 'assemble' ? '<span class="bc8-badge bc8-fresh-ok" style="margin-left:4px;">SAFE</span>' : '<span class="bc8-badge bc8-countdown" style="margin-left:4px;">RNG</span>';
         var hammerRec = '';
         if (dc2.type === 'smash') {
-          var rec = recommendHammer(dc2.label, S.ownedHammers || []);
+          var rec = recommendHammer(dc2.label, S.ownedHammers || [], dc2.type);
           if (rec) { hammerRec = ' <span class="bc8-muted">Use: ' + dn(rec) + '</span>'; }
         }
         h += '<div class="bc8-recipe"><div class="bc8-recipe-name">' + dc2.label + craftBadge + '</div><div class="bc8-muted">' + dc2.inputs.map(tokHuman).join(' + ') + hammerRec + '</div></div>';
@@ -1472,7 +1505,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v10.3] booted');
+    console.log('[BeetleCoach v10.4] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
