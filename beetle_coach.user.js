@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      11.2.0
+// @version      11.3.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '11.2.0';
+  const CURRENT_VER = '11.3.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -1198,24 +1198,67 @@
     return false;
   }
 
-  // Detect stuck "PROCESSING..." state and auto-refresh
+  /*
+   * GAME BEHAVIOR NOTE: The BeetleBoy game can enter a "PROCESSING..." state
+   * where claim/hunt buttons show "loading" CSS class and "PROCESSING..." text.
+   * This state can persist across page reloads and blocks all automation.
+   *
+   * Known causes:
+   * - Server latency or timeout during claim/hunt
+   * - Simultaneous actions (fixed in v10.9 with one-action-per-cycle)
+   * - Network issues during RDP sessions
+   * - Session timeout/reconnection
+   *
+   * Recovery strategy:
+   * 1. Detect "loading" class on claim/hunt buttons
+   * 2. Wait 15 seconds (game might resolve naturally)
+   * 3. If still stuck, refresh the page
+   * 4. If still stuck after refresh, navigate to beetle cartridge fresh
+   * 5. Log all recovery actions for debugging
+   *
+   * After claim/hunt: always wait for game to fully process before
+   * attempting the next action. The one-action-per-cycle design ensures
+   * we never fire two actions simultaneously.
+   */
   var _stuckSince = 0;
+  var _stuckRefreshCount = 0;
   function checkStuckState() {
     var claimBtn = document.querySelector('.beetle-catch-module__catch-button');
     var huntBtn = document.querySelector('.beetle-catch-module__hunt-button');
-    var isStuck = (claimBtn && claimBtn.classList.contains('loading')) ||
-                  (huntBtn && huntBtn.classList.contains('loading'));
+    var isStuck = false;
+    if (claimBtn && (claimBtn.classList.contains('loading') || /PROCESSING/i.test(claimBtn.textContent))) { isStuck = true; }
+    if (huntBtn && (huntBtn.classList.contains('loading') || /PROCESSING/i.test(huntBtn.textContent))) { isStuck = true; }
+
     if (isStuck) {
-      if (!_stuckSince) { _stuckSince = Date.now(); }
-      if (Date.now() - _stuckSince > 30000) {
-        logEvent('Game stuck on PROCESSING — refreshing page...');
+      if (!_stuckSince) {
+        _stuckSince = Date.now();
+        logEvent('Game buttons stuck on PROCESSING...');
+      }
+      var stuckDuration = Date.now() - _stuckSince;
+      if (stuckDuration > 15000 && _stuckRefreshCount < 3) {
+        // Try refreshing
+        _stuckRefreshCount++;
+        logEvent('Auto-recovering: refresh #' + _stuckRefreshCount + ' (stuck ' + Math.round(stuckDuration/1000) + 's)');
         save();
         _stuckSince = 0;
         window.location.reload();
         return true;
       }
+      if (stuckDuration > 60000) {
+        // Hard reset: navigate to beetle page fresh
+        _stuckRefreshCount = 0;
+        _stuckSince = 0;
+        logEvent('Auto-recovering: hard navigation reset');
+        save();
+        window.location.href = 'https://www.remilia.net/home?cartridge=beetle';
+        return true;
+      }
+      return true; // Still stuck, skip actions this cycle
     } else {
+      // Recovered
+      if (_stuckSince) { logEvent('Game recovered from stuck state'); }
       _stuckSince = 0;
+      _stuckRefreshCount = 0;
     }
     return false;
   }
@@ -1626,7 +1669,7 @@
       if (tryAutoHunt()) { return; }
       tryClaimCheese();
     }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v11.2] booted');
+    console.log('[BeetleCoach v11.3] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
