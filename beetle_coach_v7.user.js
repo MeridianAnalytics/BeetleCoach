@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.8.0
+// @version      8.9.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '8.8.0';
+  const CURRENT_VER = '8.9.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -909,9 +909,9 @@
       '.bc8-strip-label{color:#6b8a90;font-weight:600;}',
       '.bc8-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:700;}',
       '.bc8-ready{background:#d4edda;color:#155724;}.bc8-countdown{background:#fff3cd;color:#856404;}.bc8-stale{background:#f8d7da;color:#721c24;}.bc8-fresh-ok{background:#d4edda;color:#155724;}.bc8-warming{background:#fff3cd;color:#856404;}',
-      '.bc8-card{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:10px;flex-shrink:0;}',
-      '.bc8-focus{background:#f0f9fb;border:1px solid #b8e6ec;border-radius:10px;padding:12px;flex-shrink:0;}',
-      '.bc8-scroll{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:10px;overflow-y:auto;overflow-x:hidden;flex-shrink:1;flex-grow:0;min-height:30px;}',
+      '.bc8-card{background:#fafeff;border:1px solid #d5eef2;border-radius:8px;padding:8px;flex-shrink:0;}',
+      '.bc8-focus{background:#f0f9fb;border:1px solid #b8e6ec;border-radius:8px;padding:10px;flex-shrink:0;}',
+      '.bc8-scroll{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:8px;overflow-y:auto;overflow-x:hidden;flex-shrink:1;flex-grow:1;min-height:60px;}',
       '.bc8-scroll::-webkit-scrollbar{width:5px;}.bc8-scroll::-webkit-scrollbar-thumb{background:#b8e6ec;border-radius:3px;}',
       '.bc8-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;font-size:11px;line-height:1.4;}',
       '.bc8-row-name{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:65%;}',
@@ -924,7 +924,9 @@
       '.bc8-recipe{padding:3px 0;border-bottom:1px solid #eef5f7;}.bc8-recipe:last-child{border-bottom:none;}',
       '.bc8-recipe-name{font-weight:700;font-size:11px;}',
       '.bc8-jd{font-size:9px;color:#8a9a9a;margin-left:4px;}',
-      '.bc8-log-line{font-size:9px;color:#6b8a90;line-height:1.4;border-bottom:1px solid #f0f7f9;padding:1px 0;}'
+      '.bc8-log-line{font-size:9px;color:#6b8a90;line-height:1.4;border-bottom:1px solid #f0f7f9;padding:1px 0;}',
+      '.bc8-collapse{cursor:pointer;user-select:none;}.bc8-collapse:hover{opacity:0.8;}',
+      '.bc8-collapse-body{overflow:hidden;transition:max-height 0.2s;}.bc8-collapse-body.collapsed{max-height:0!important;padding:0!important;margin:0!important;}'
     ].join('');
     document.head.appendChild(s);
   }
@@ -1007,28 +1009,25 @@
     }
     h += '</div>';
 
-    // Progression
+    // Progression + Collection (combined compact card)
     var stage = getStage(inv);
     var stageInfo = getNextStageGoals(inv, stage);
-    h += '<div class="bc8-card"><div class="bc8-h">Progression</div><div style="display:flex;gap:2px;margin-bottom:4px;">';
+    var col = getCollection(inv);
+    var allMissing = col.missingB.map(dn).concat(col.missingF.map(dn));
+    h += '<div class="bc8-card">';
+    // Progress bar
+    h += '<div style="display:flex;gap:2px;margin-bottom:4px;">';
     var stageColors = ['#7a8a7a','#b87333','#5b8dd9','#9b59b6','#e67e22','#e74c3c','#f1c40f'];
     for (var si2 = 0; si2 < 7; si2++) {
-      h += '<div style="flex:1;height:5px;border-radius:3px;background:' + (si2 < stage ? stageColors[si2] : '#d5e8ec') + ';"></div>';
-    }
-    h += '</div><div class="bc8-row"><div>Stage ' + stage + ' / 7</div><div class="bc8-val">' + (STAGES[stage-1] ? STAGES[stage-1].name : 'Starting') + '</div></div>';
-    if (stageInfo.next && stageInfo.goals.length) {
-      h += '<div class="bc8-muted">Next: <b>' + stageInfo.next.name + '</b> \u2014 Need: ' + stageInfo.goals.join(', ') + '</div>';
+      h += '<div style="flex:1;height:4px;border-radius:2px;background:' + (si2 < stage ? stageColors[si2] : '#d5e8ec') + ';"></div>';
     }
     h += '</div>';
-
-    // Collection
-    var col = getCollection(inv);
-    h += '<div class="bc8-card"><div class="bc8-h">Collection</div>';
-    h += '<div class="bc8-row"><div>Beetles</div><div class="bc8-val">' + col.ownedB.length + ' / ' + col.totalB + '</div></div>';
-    h += '<div class="bc8-row"><div>Flowers</div><div class="bc8-val">' + col.ownedF.length + ' / ' + col.totalF + '</div></div>';
-    var allMissing = col.missingB.map(dn).concat(col.missingF.map(dn));
-    if (allMissing.length > 0 && allMissing.length <= 12) {
-      h += '<div class="bc8-muted" style="margin-top:3px;">Missing: ' + allMissing.join(', ') + '</div>';
+    h += '<div class="bc8-row"><div>Stage ' + stage + '/7 \u00B7 ' + (STAGES[stage-1] ? STAGES[stage-1].name : 'Starting') + '</div><div class="bc8-val">Beetles ' + col.ownedB.length + '/' + col.totalB + ' \u00B7 Flowers ' + col.ownedF.length + '/' + col.totalF + '</div></div>';
+    if (stageInfo.next && stageInfo.goals.length) {
+      h += '<div class="bc8-muted">Next: ' + stageInfo.goals.join(', ') + '</div>';
+    }
+    if (allMissing.length > 0 && allMissing.length <= 8) {
+      h += '<div class="bc8-muted">Missing: ' + allMissing.join(', ') + '</div>';
     }
     h += '</div>';
 
@@ -1067,15 +1066,13 @@
     }
     h += '</div>';
 
-    // Session Stats
+    // Session Stats (compact single-line + gained)
     var sess = S.session || {};
     var sessionMins = Math.round((Date.now() - (sess.startTime || Date.now())) / 60000);
-    h += '<div class="bc8-card"><div class="bc8-h">Session</div>';
-    h += '<div class="bc8-row"><div>Duration</div><div class="bc8-val">' + (sessionMins < 60 ? sessionMins + 'm' : Math.floor(sessionMins/60) + 'h ' + (sessionMins%60) + 'm') + '</div></div>';
-    h += '<div class="bc8-row"><div>Claims / Hunts</div><div class="bc8-val">' + (sess.claims||0) + ' / ' + (sess.hunts||0) + '</div></div>';
-    h += '<div class="bc8-row"><div>Cheese claims</div><div class="bc8-val">' + (sess.cheeseClaims||0) + '</div></div>';
+    var durStr = sessionMins < 60 ? sessionMins + 'm' : Math.floor(sessionMins/60) + 'h' + (sessionMins%60 ? ' ' + (sessionMins%60) + 'm' : '');
+    h += '<div class="bc8-card">';
+    h += '<div class="bc8-row"><div class="bc8-h" style="margin:0;">Session</div><div class="bc8-val">' + durStr + ' \u00B7 ' + (sess.claims||0) + ' claims \u00B7 ' + (sess.hunts||0) + ' hunts</div></div>';
     if (sess.beetles && sess.beetles.length > 0) {
-      // Aggregate gained beetles by name with counts
       var gainCounts = {};
       for (var gi = 0; gi < sess.beetles.length; gi++) {
         gainCounts[sess.beetles[gi]] = (gainCounts[sess.beetles[gi]]||0) + 1;
@@ -1083,7 +1080,7 @@
       var gainStr = Object.keys(gainCounts).map(function(name) {
         return gainCounts[name] > 1 ? name + ' x' + gainCounts[name] : name;
       }).join(', ');
-      h += '<div class="bc8-muted" style="margin-top:3px;">Gained: ' + gainStr + '</div>';
+      h += '<div class="bc8-muted">Gained: ' + gainStr + '</div>';
     }
     h += '</div>';
 
@@ -1203,7 +1200,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v8.8] booted');
+    console.log('[BeetleCoach v8.9] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
