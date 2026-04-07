@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      10.8.0
+// @version      10.9.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '10.8.0';
+  const CURRENT_VER = '10.9.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -1184,46 +1184,47 @@
     return false;
   }
 
+  // Returns true if action was taken (caller should stop processing other actions)
   function tryAutoClaim() {
-    if (!S.autoClaim || _scanning) { return; }
-    if (Date.now() - _lastClaimTime < 30000) { return; }
-    // Check nav bar — is claim ready?
+    if (!S.autoClaim || _scanning) { return false; }
+    if (Date.now() - _lastClaimTime < 30000) { return false; }
     var navBC = document.querySelector('.beetle-game-nav .info');
-    if (!navBC || !/ready/i.test(navBC.textContent)) { return; }
-    // Ensure we're on beetle cartridge
-    if (!ensureBeetlePage('claim')) { return; }
+    if (!navBC || !/ready/i.test(navBC.textContent)) { return false; }
+    if (!ensureBeetlePage('claim')) { return true; } // Navigating counts as "action taken"
     var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
-      if (/\d+[mhMs]\s/i.test(btnText)) { return; }
+      if (/\d+[mhMs]\s/i.test(btnText)) { return false; }
       btn.click(); _lastClaimTime = Date.now();
       S.session.claims++;
       logEvent('Auto-claimed beetle!');
       save();
       postActionRefresh('Post-claim', 12000);
+      return true;
     }
+    return false;
   }
   function tryAutoHunt() {
-    if (!S.autoHunt || _scanning) { return; }
+    if (!S.autoHunt || _scanning) { return false; }
     var cheese = S.mergedInventory.cheese || 0;
-    if (cheese < HUNT_COST) { return; }
-    if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return; }
-    if (Date.now() - _lastHuntTime < 15000) { return; }
-    // Check hunt button isn't on cooldown from nav/text
+    if (cheese < HUNT_COST) { return false; }
+    if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return false; }
+    if (Date.now() - _lastHuntTime < 15000) { return false; }
     var huntCostEl = document.querySelector('.beetle-catch-module__hunt-button-cheese-cost');
-    if (huntCostEl && /cooldown/i.test(huntCostEl.textContent)) { return; }
-    // Ensure we're on beetle cartridge
-    if (!ensureBeetlePage('hunt')) { return; }
+    if (huntCostEl && /cooldown/i.test(huntCostEl.textContent)) { return false; }
+    if (!ensureBeetlePage('hunt')) { return true; }
     var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
-      if (/cooldown/i.test(btnText)) { return; }
+      if (/cooldown/i.test(btnText)) { return false; }
       btn.click(); _lastHuntTime = Date.now();
       S.session.hunts++;
       logEvent('Auto-hunted (-' + HUNT_COST + ' cheese)');
       save();
       postActionRefresh('Post-hunt', 8000);
+      return true;
     }
+    return false;
   }
   function tryClaimCheese() {
     if (_scanning) { return; }
@@ -1572,8 +1573,13 @@
     fullScan();
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
-    _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v10.8] booted');
+    // Only fire ONE action per cycle to prevent simultaneous clicks
+    _intervals.push(setInterval(function() {
+      if (tryAutoClaim()) { return; }
+      if (tryAutoHunt()) { return; }
+      tryClaimCheese();
+    }, ACTION_INTERVAL));
+    console.log('[BeetleCoach v10.9] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
