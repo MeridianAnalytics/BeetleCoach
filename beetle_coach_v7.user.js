@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.5.0
+// @version      8.6.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '8.5.0';
+  const CURRENT_VER = '8.6.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -215,7 +215,7 @@
 
   /* ─── Store with migration ─── */
   function defaults() {
-    return {ver:CURRENT_VER,mergedInventory:{},currentHammer:null,ownedHammers:[],
+    return {ver:CURRENT_VER,mergedInventory:{},currentHammer:null,ownedHammers:[],brokenHammers:[],discoveredHammers:[],
       currentHammerBonus:null,currentHammerBreakChance:null,
       timers:{},lastFullScan:0,lastPassiveScan:0,autoClaim:true,autoHunt:false,panelOpen:true,level:null,craftMode:null,
       log:[],
@@ -493,16 +493,27 @@
     S.timers = t;
   }
   function parseHammer() {
-    var owned = [];
+    var owned = [];   // Available hammers (not broken)
+    var broken = [];  // Broken hammers (--empty class)
+    var discovered = []; // All discovered (owned + broken)
     document.querySelectorAll('.crafting-module__hammer-row .crafting-module__hammer-slot').forEach(function(s) {
       if (s.classList.contains('crafting-module__hammer-slot--undiscovered')) { return; }
       var img = s.querySelector('.crafting-module__beetle-img'); if (!img) { return; }
       var k = resolveItemKey(s, img);
-      if (k && k.indexOf('hammer_t') === 0) { owned.push(k); }
+      if (k && k.indexOf('hammer_t') === 0) {
+        discovered.push(k);
+        if (s.classList.contains('crafting-module__hammer-slot--empty')) {
+          broken.push(k);
+        } else {
+          owned.push(k);
+        }
+      }
     });
     owned.sort(function(a,b) { return HAMMER_TIERS.indexOf(b) - HAMMER_TIERS.indexOf(a); });
     S.ownedHammers = owned;
-    S.currentHammer = owned[0] || null;
+    S.brokenHammers = broken;
+    S.discoveredHammers = discovered;
+    S.currentHammer = owned[0] || null; // Highest non-broken hammer
     var st = S.currentHammer ? HAMMER_STATS[S.currentHammer] : null;
     S.currentHammerBonus = st ? st.bonus : null;
     S.currentHammerBreakChance = st ? st.baseBreak : null;
@@ -916,9 +927,11 @@
     // FIX 5: Status strip (compact, not a card)
     h += '<div class="bc8-strip">';
     h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Hammer:</span> ' + (S.currentHammer ? dn(S.currentHammer) : '\u2014') + '</div>';
-    // FIX 6: Hammer label honesty
     if (S.currentHammerBonus != null) {
       h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Base:</span> +' + S.currentHammerBonus + '% / ' + S.currentHammerBreakChance + '% break</div>';
+    }
+    if (S.brokenHammers && S.brokenHammers.length > 0) {
+      h += '<div class="bc8-strip-item"><span style="color:#e74c3c;font-weight:700;">Broken:</span> ' + S.brokenHammers.map(dn).join(', ') + '</div>';
     }
     h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Claim:</span> <span id="bc8-t-claim">' + fmtT(timers.beetleCatch) + '</span></div>';
     h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Hunt:</span> <span id="bc8-t-hunt">' + fmtT(timers.huntCooldown) + '</span></div>';
@@ -1116,7 +1129,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v8.5] booted');
+    console.log('[BeetleCoach v8.6] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
