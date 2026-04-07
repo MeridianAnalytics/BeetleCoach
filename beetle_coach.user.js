@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      10.6.0
+// @version      10.7.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '10.6.0';
+  const CURRENT_VER = '10.7.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -283,7 +283,11 @@
       }
       if (!raw) { return defaults(); }
       var p = Object.assign(defaults(), JSON.parse(raw));
-      if (p.ver !== CURRENT_VER) { p.mergedInventory = {}; p.ver = CURRENT_VER; p.log = []; }
+      // Only wipe inventory on major version change (e.g. 9.x -> 10.x), not patches
+      var oldMajor = (p.ver || '0').split('.')[0];
+      var newMajor = CURRENT_VER.split('.')[0];
+      if (oldMajor !== newMajor) { p.mergedInventory = {}; p.log = []; }
+      p.ver = CURRENT_VER;
       return p;
     } catch(e) { return defaults(); }
   }
@@ -913,22 +917,22 @@
   // FLOWERS: Build the pollen pipeline. Prioritize flowers, pollens, and bridges.
   // For players who need to stockpile materials before pushing beetle progression.
   var FLOWER_CHAIN = [
-    // Step 1: Bronze flowers -> Bronze Pollen (the engine that makes everything go)
-    {key:'pollen_bronze',recipe:'Bronze Pollen',prereqs:[],via:'Assemble 2 Bronze flowers. Farm: Green + Purple + Junk Cube transmute.'},
-    // Step 2: Bridges from pollen
-    {key:'nectar',recipe:'Nectar / Cattail Bridge',prereqs:['pollen_bronze'],via:'Bronze beetle + Bronze Pollen'},
-    {key:'cattail',recipe:'Nectar / Cattail Bridge',prereqs:['pollen_bronze'],via:'Bronze beetle + Bronze Pollen'},
-    // Step 3: Mithril flowers -> Mithril Pollen
-    {key:'pollen_mithril',recipe:'Mithril Pollen',prereqs:[],via:'Assemble 2 Mithril flowers. Farm: Green + Mithril beetle + Junk Cube.'},
-    // Step 4: Mithril bridges (need all 3 artifacts eventually)
-    {key:'pinecone',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG: 1 of 3)'},
-    {key:'moss',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG: 1 of 3)'},
-    {key:'gunpowder',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG: 1 of 3)'},
-    // Step 5: Adamantine flowers
+    // Priority 1: Stockpile Bronze Pollen (need many — pipeline fuel)
+    {key:'pollen_bronze',recipe:'Bronze Pollen',prereqs:[],via:'Assemble 2 Bronze flowers. Farm: Green + Purple + Junk Cube.', minQty:5},
+    // Priority 2: Use Bronze Pollen for bridges
+    {key:'nectar',recipe:'Nectar / Cattail Bridge',prereqs:['pollen_bronze'],via:'Bronze beetle + Bronze Pollen', minQty:3},
+    {key:'cattail',recipe:'Nectar / Cattail Bridge',prereqs:['pollen_bronze'],via:'Bronze beetle + Bronze Pollen', minQty:3},
+    // Priority 3: Mithril Pollen (need several for artifact runs)
+    {key:'pollen_mithril',recipe:'Mithril Pollen',prereqs:[],via:'Assemble 2 Mithril flowers (costly!).', minQty:3},
+    // Priority 4: All 3 Mithril artifacts
+    {key:'pinecone',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG 1/3)'},
+    {key:'moss',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG 1/3)'},
+    {key:'gunpowder',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG 1/3)'},
+    // Priority 5: Adamantine flowers
     {key:'gazania',recipe:null,prereqs:['goliath'],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
     {key:'pincushion',recipe:null,prereqs:['goliath'],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
-    // Step 6: Adamantine Pollen (endgame material)
-    {key:'pollen_adamantine',recipe:'Adamantine Pollen',prereqs:[],via:'Assemble 2 Adamantine flowers (Pincushion + Gazania)'}
+    // Priority 6: Adamantine Pollen
+    {key:'pollen_adamantine',recipe:'Adamantine Pollen',prereqs:[],via:'Assemble Pincushion + Gazania'}
   ];
 
   // Find the NEXT progression goal and what concrete step advances it
@@ -948,7 +952,8 @@
 
     for (var ci = 0; ci < chain.length; ci++) {
       var goal = chain[ci];
-      if ((inv[goal.key]||0) > 0) { continue; }
+      var minQty = goal.minQty || 1; // For flowers/pollens, might need more than 1
+      if ((inv[goal.key]||0) >= minQty) { continue; }
 
       var missingPrereqs = [];
       for (var pi = 0; pi < goal.prereqs.length; pi++) {
@@ -1031,10 +1036,17 @@
       }
     }
 
-    // Phase 1: Direct crafts (fill remaining slots)
+    // Phase 1: Direct crafts with strategy-aware boosting
+    var FLOWER_BOOST = {'Bronze Pollen':30,'Mithril Pollen':30,'Adamantine Pollen':30,
+      'Tin Pollen':15,'Bronze Flower Transmute':25,'Mithril Flower Transmute':35,
+      'Nectar / Cattail Bridge':20,'Pinecone / Moss / Gunpowder Bridge':25};
+    var ENDGAME_BOOST = {'Pinecone / Moss / Gunpowder Bridge':20,'Black Lotus':15};
     for (var di = 0; di < directCrafts.length; di++) {
       var r = directCrafts[di];
       var value = RECIPE_VALUE[r.label] || 5;
+      // Apply strategy boost
+      if (S.strategy === 'flowers' && FLOWER_BOOST[r.label]) { value += FLOWER_BOOST[r.label]; }
+      if (S.strategy === 'endgame' && ENDGAME_BOOST[r.label]) { value += ENDGAME_BOOST[r.label]; }
       var fragile = r.inputs.some(function(t) {
         var group = TOKEN_GROUPS[t];
         if (group) { return cnt(inv, group) <= 1; }
@@ -1561,7 +1573,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v10.6] booted');
+    console.log('[BeetleCoach v10.7] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
