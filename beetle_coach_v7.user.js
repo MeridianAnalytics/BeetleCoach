@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.7.0
+// @version      8.8.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '8.7.0';
+  const CURRENT_VER = '8.8.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -896,9 +896,9 @@
     s.textContent = [
       '#',BTN_ID,'{position:fixed;left:20px;bottom:20px;z-index:999999;padding:10px 14px;background:#d7f4f7;color:#11383d;border:1px solid #9bd8e0;border-radius:12px;font-weight:700;cursor:pointer;font-size:14px;}',
       '#',BTN_ID,':hover{background:#c0edf2;}',
-      '#',PANEL_ID,'{position:fixed;left:20px;top:50px;z-index:999999;width:350px;background:#fff;border:2px solid #b8e6ec;border-radius:16px;padding:14px;box-shadow:0 14px 40px rgba(0,0,0,.18);font-family:Arial,sans-serif;color:#163238;max-height:calc(100vh - 70px);display:flex;flex-direction:column;gap:5px;overflow:hidden;}',
+      '#',PANEL_ID,'{position:fixed;left:20px;top:50px;z-index:999999;width:380px;min-width:300px;max-width:90vw;background:#fff;border:2px solid #b8e6ec;border-radius:16px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.18);font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;color:#163238;max-height:calc(100vh - 70px);display:flex;flex-direction:column;gap:6px;overflow:hidden;resize:horizontal;}',
       '#',PANEL_ID,'.hidden{display:none!important;}',
-      '.bc8-header{display:flex;align-items:center;justify-content:space-between;}',
+      '.bc8-header{display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;padding-bottom:4px;border-bottom:1px solid #e8f4f7;margin-bottom:2px;}',
       '.bc8-title{font-size:18px;font-weight:800;}',
       '.bc8-sub{font-size:11px;color:#5a7379;font-weight:700;}',
       '.bc8-btns{display:flex;gap:3px;flex-wrap:wrap;}',
@@ -914,7 +914,7 @@
       '.bc8-scroll{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:10px;overflow-y:auto;overflow-x:hidden;flex-shrink:1;flex-grow:0;min-height:30px;}',
       '.bc8-scroll::-webkit-scrollbar{width:5px;}.bc8-scroll::-webkit-scrollbar-thumb{background:#b8e6ec;border-radius:3px;}',
       '.bc8-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;font-size:11px;line-height:1.4;}',
-      '.bc8-row-name{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px;}',
+      '.bc8-row-name{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:65%;}',
       '.bc8-h{font-weight:800;font-size:13px;margin-bottom:6px;color:#11383d;}',
       '.bc8-muted{color:#6b8a90;font-size:10px;}',
       '.bc8-tier{font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;color:#fff;flex-shrink:0;}',
@@ -1075,7 +1075,15 @@
     h += '<div class="bc8-row"><div>Claims / Hunts</div><div class="bc8-val">' + (sess.claims||0) + ' / ' + (sess.hunts||0) + '</div></div>';
     h += '<div class="bc8-row"><div>Cheese claims</div><div class="bc8-val">' + (sess.cheeseClaims||0) + '</div></div>';
     if (sess.beetles && sess.beetles.length > 0) {
-      h += '<div class="bc8-muted" style="margin-top:3px;">Gained: ' + sess.beetles.join(', ') + '</div>';
+      // Aggregate gained beetles by name with counts
+      var gainCounts = {};
+      for (var gi = 0; gi < sess.beetles.length; gi++) {
+        gainCounts[sess.beetles[gi]] = (gainCounts[sess.beetles[gi]]||0) + 1;
+      }
+      var gainStr = Object.keys(gainCounts).map(function(name) {
+        return gainCounts[name] > 1 ? name + ' x' + gainCounts[name] : name;
+      }).join(', ');
+      h += '<div class="bc8-muted" style="margin-top:3px;">Gained: ' + gainStr + '</div>';
     }
     h += '</div>';
 
@@ -1132,10 +1140,32 @@
     document.getElementById('bc8-rst').addEventListener('click', function() {
       if (confirm('Clear all data and rescan?')) { resetStore(); fullScan(); }
     });
-    document.getElementById('bc8-minimize').addEventListener('click', function() {
+    document.getElementById('bc8-minimize').addEventListener('click', function(e) {
+      e.stopPropagation();
       var p = document.getElementById(PANEL_ID);
       if (p) { p.classList.add('hidden'); S.panelOpen = false; save(); }
     });
+    // Draggable header
+    var header = document.querySelector('.bc8-header');
+    if (header) {
+      var dragging = false, dragX = 0, dragY = 0;
+      header.addEventListener('mousedown', function(e) {
+        if (e.target.id === 'bc8-minimize') { return; }
+        dragging = true;
+        var p = document.getElementById(PANEL_ID);
+        dragX = e.clientX - p.offsetLeft;
+        dragY = e.clientY - p.offsetTop;
+        e.preventDefault();
+      });
+      document.addEventListener('mousemove', function(e) {
+        if (!dragging) { return; }
+        var p = document.getElementById(PANEL_ID);
+        if (!p) { return; }
+        p.style.left = Math.max(0, e.clientX - dragX) + 'px';
+        p.style.top = Math.max(0, e.clientY - dragY) + 'px';
+      });
+      document.addEventListener('mouseup', function() { dragging = false; });
+    }
   }
 
   /* ─── UI ─── */
@@ -1173,7 +1203,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v8.7] booted');
+    console.log('[BeetleCoach v8.8] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
