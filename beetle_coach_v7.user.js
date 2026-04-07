@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.0.0
+// @version      8.1.0
 // @description  BeetleBoy coach: auto-claim, pathways, value-sorted recipes, tier labels, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -15,7 +15,7 @@
   const PANEL_ID = 'bc7-panel';
   const BTN_ID = 'bc7-toggle';
   const STYLE_ID = 'bc7-style';
-  const CURRENT_VER = '8.0.0';
+  const CURRENT_VER = '8.1.0';
 
   /* ─── Labels ─── */
   const LABELS = {
@@ -438,8 +438,26 @@
   }
 
   /* ─── Smart Recommendations Engine ─── */
-  // Only recommend recipes where ALL ingredients exist in current inventory
-  // For multi-step: simulate consumption between steps
+  // Collection protection: never consume last copy of a collected beetle/flower
+  const COLLECTIBLES = new Set([...ALL_BEETLES, ...ALL_FLOWERS]);
+  function wouldConsumeLastCollectible(recipe, inv) {
+    for (const token of recipe.inputs) {
+      const group = TOKEN_GROUPS[token];
+      if (group) {
+        // For group tokens, check which member would be consumed
+        for (const k of group) {
+          if ((inv[k]||0) > 0 && COLLECTIBLES.has(k) && (inv[k]||0) <= 1) {
+            return true; // Would consume last copy of a collectible
+          }
+        }
+      } else if (COLLECTIBLES.has(token) && (inv[token]||0) <= 1) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Only recommend recipes where ALL ingredients exist AND won't destroy collection
   function getDirectCrafts(inv) {
     const ht = S.ownedHammers.length ? Math.max(...S.ownedHammers.map(h=>HAMMER_TIERS.indexOf(h))) : -1;
     return RECIPES.filter(r => {
@@ -449,6 +467,8 @@
       const hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
         'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'}[r.label];
       if (hk) { const ot = HAMMER_TIERS.indexOf(hk); if (ot<=ht||ot>ht+1) return false; }
+      // Don't suggest recipes that would consume last copy of a collectible
+      if (wouldConsumeLastCollectible(r, inv)) return false;
       return true;
     }).sort((a,b) => (RECIPE_VALUE[b.label]||5) - (RECIPE_VALUE[a.label]||5));
   }
@@ -530,11 +550,12 @@
         const prereq = RECIPES.find(x => x.label === prereqLabel);
         if (!prereq || !canMake(prereq, inv)) continue;
 
+        // Collection protection: skip if prereq or goal would consume last collectible
+        if (wouldConsumeLastCollectible(prereq, inv)) continue;
         // Simulate: consume prereq inputs, add output, check if goal is now craftable
         let vInv = consumeInputs(inv, prereq);
-        // Add the prereq output to virtual inventory
         vInv[missingToken] = (vInv[missingToken]||0) + 1;
-        if (canMake(recipe, vInv)) {
+        if (canMake(recipe, vInv) && !wouldConsumeLastCollectible(recipe, vInv)) {
           const value = RECIPE_VALUE[recipe.label] || 5;
           plans.push({
             goal: recipe.label, value: value - 5, type: '2-step',
@@ -607,6 +628,27 @@
       btn.click(); _lastHuntTime = Date.now();
       logEvent('Auto-hunted! (-20 cheese)');
       setTimeout(() => { logEvent('Post-hunt scan'); fullScan(); }, 10000);
+    }
+  }
+
+  /* ─── Auto-Claim Daily Cheese ─── */
+  let _lastCheeseTime = 0;
+  function tryClaimCheese() {
+    if (_scanning) return;
+    if (Date.now() - _lastCheeseTime < 60000) return; // Don't re-trigger within 60s
+    // Check nav bar for "ready" state
+    const navCheese = document.querySelector('.cheese-claim-nav .info');
+    if (!navCheese || !/ready/i.test(navCheese.textContent)) return;
+    // Find the claim button in the cheese module
+    const btn = document.querySelector('.claim-button:not(.disabled)');
+    if (btn) {
+      btn.click();
+      _lastCheeseTime = Date.now();
+      logEvent('Auto-claimed daily cheese!');
+      setTimeout(function() {
+        logEvent('Post-cheese scan');
+        fullScan();
+      }, 5000);
     }
   }
 
@@ -856,8 +898,8 @@
     ensureUI();
     fullScan();
     _intervals.push(setInterval(refreshTimers, 5000));
-    _intervals.push(setInterval(() => { tryAutoClaim(); tryAutoHunt(); }, 10000));
-    console.log('[BeetleCoach v8.0] booted');
+    _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, 10000));
+    console.log('[BeetleCoach v8.1] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail',e); } }
   if (document.readyState==='complete'||document.readyState==='interactive') {
