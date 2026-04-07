@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      9.3.0
+// @version      9.4.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '9.3.0';
+  const CURRENT_VER = '9.4.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -309,6 +309,9 @@
       missing: col.missingB.map(dn).concat(col.missingF.map(dn)),
       inventory: {},
       junkTotal: cnt(inv, ANY_JUNK),
+      scanConfidence: scanConfidence(),
+      lastFullScan: S.lastFullScan ? new Date(S.lastFullScan).toISOString() : null,
+      lastPassiveScan: S.lastPassiveScan ? new Date(S.lastPassiveScan).toISOString() : null,
       session: S.session
     };
     // Build readable inventory (non-junk, non-hammer)
@@ -634,7 +637,8 @@
     if (!ts) { return 'never'; }
     var s = Math.round((Date.now() - ts) / 1000);
     var age = s < 60 ? s + 's' : Math.round(s/60) + 'm';
-    return conf === 'warming' ? age + ' passive' : age;
+    if (conf === 'warming') { return 'Warm ' + age; }
+    return 'Fresh ' + age;
   }
 
   /* ─── Recommendation Engine ─── */
@@ -685,6 +689,23 @@
       if ((key === 'pond' || key === 'monarch') && (inv[key]||0) <= 2) {
         return true; // Keep at least 2 of each for progression recipes
       }
+    }
+    // Protect Mithril artifacts for Black Lotus path (needs all 3)
+    if (!(inv['black_lotus']||0)) {
+      if ((key === 'pinecone' || key === 'moss' || key === 'gunpowder') && (inv[key]||0) <= 1) {
+        return true;
+      }
+    }
+    // Protect Adamantine flowers for Epic beetle path
+    if (!(inv['sunset_moth']||0)) {
+      if (key === 'gazania' && (inv[key]||0) <= 1) { return true; }
+    }
+    if (!(inv['sabertooth_longhorn']||0)) {
+      if (key === 'pincushion' && (inv[key]||0) <= 1) { return true; }
+    }
+    // Protect Mithril Pollen while artifact bridge is still needed
+    if (!(inv['goliath']||0) || !(inv['black_lotus']||0)) {
+      if (key === 'pollen_mithril' && (inv[key]||0) <= 1) { return true; }
     }
     // Endgame: protect Mars Rhino ingredients
     if (!(inv['mars_rhino']||0)) {
@@ -971,12 +992,17 @@
   var _lastClaimTime = 0, _lastHuntTime = 0, _lastCheeseTime = 0;
   // After claim/hunt/cheese: wait for game to process, then re-parse state and full scan
   function postActionRefresh(reason, delay) {
+    // Immediate light refresh, then delayed full scan for authoritative truth
     setTimeout(function() {
       logEvent(reason + ' — refreshing...');
       parseTimers();
       parseHammer();
-      passiveScan(); // Light scan only — no pagination disruption
+      passiveScan();
       renderPanel();
+      // Queue a full scan 30s later to catch any items the passive scan missed
+      setTimeout(function() {
+        if (!_scanning) { fullScan(); }
+      }, 30000);
     }, delay);
   }
 
@@ -1347,7 +1373,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v9.3] booted');
+    console.log('[BeetleCoach v9.4] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
