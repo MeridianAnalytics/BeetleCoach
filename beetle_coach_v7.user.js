@@ -717,7 +717,7 @@
     let h='';
     // Header
     const cheeseStr = inv.cheese ? inv.cheese.toLocaleString() + ' \u{1F9C0}' : '';
-    h+=`<div class="bc7-header"><span class="bc7-title">\u{1FAB2} Beetle Coach</span>
+    h+=`<div class="bc7-header"><span class="bc7-title"><span id="bc7-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach</span>
       <span class="bc7-lv">${S.level?'Lv.'+S.level:''}${cheeseStr?' \u00B7 '+cheeseStr:''}</span></div>`;
 
     // Buttons
@@ -861,6 +861,14 @@
       if (confirm('Clear all data and rescan?')) {
         resetStore();
         fullScan();
+      }
+    });
+    document.getElementById('bc7-minimize').addEventListener('click', function() {
+      var p = document.getElementById(PANEL_ID);
+      if (p) {
+        p.classList.add('hidden');
+        S.panelOpen = false;
+        save();
       }
     });
   }
