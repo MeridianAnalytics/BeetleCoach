@@ -1,5 +1,5 @@
 # BeetleBoy / BeetleCraft — Known Recipes, Facts & Coach Reference
-_Last updated: 2026-04-07 (v8.7 — hammer intelligence, DOM state detection, full wiki cross-ref)_
+_Last updated: 2026-04-07 (v9.2 — goal-directed progression engine, inventory export)_
 
 This is the clean human-readable recipe and mechanics text file for future AI chats and personal reference.
 
@@ -526,6 +526,18 @@ GitHub: https://github.com/MeridianAnalytics/BeetleCoach
 - Inventory with tier badges, junk consolidation
 - Activity log with timestamps
 - Minimize via beetle emoji click in header
+
+### Goal-directed progression engine (v9.2)
+- PROGRESSION_CHAIN defines the full collection path: Goliath → Sunset Moth → Black Lotus → Mars Rhino → Hercules
+- getProgressionMove() finds the NEXT concrete step that advances the collection, not just what's craftable
+- Progression moves get priority + green GOAL badge in the UI
+- If progression is blocked, shows what's needed and how to get it
+- Fills remaining recommendation slots with direct crafts sorted by value
+
+### Inventory export
+- Export button downloads JSON snapshot (inventory, collection, session, missing items)
+- Console log on every full scan: [BeetleCoach] Inventory snapshot: {...}
+- Useful for pasting into AI conversations or tracking progress over time
 
 ### Architecture
 - Single IIFE, single file, no dependencies

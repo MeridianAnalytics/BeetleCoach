@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      9.1.0
+// @version      9.2.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '9.1.0';
+  const CURRENT_VER = '9.2.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -293,6 +293,51 @@
     }
   }
 
+  /* ─── Inventory Export ─── */
+  function exportInventory() {
+    var inv = S.mergedInventory || {};
+    var col = getCollection(inv);
+    var snapshot = {
+      timestamp: new Date().toISOString(),
+      level: S.level,
+      cheese: inv.cheese || 0,
+      hammer: S.currentHammer ? dn(S.currentHammer) : null,
+      brokenHammers: (S.brokenHammers||[]).map(dn),
+      stage: getStage(inv),
+      beetlesOwned: col.ownedB.length + '/' + col.totalB,
+      flowersOwned: col.ownedF.length + '/' + col.totalF,
+      missing: col.missingB.map(dn).concat(col.missingF.map(dn)),
+      inventory: {},
+      junkTotal: cnt(inv, ANY_JUNK),
+      session: S.session
+    };
+    // Build readable inventory (non-junk, non-hammer)
+    var keys = Object.keys(inv).filter(function(k) { return !JUNK_SET.has(k) && !SKIP_DISPLAY.has(k); })
+      .sort(function(a,b) { return (inv[b]||0) - (inv[a]||0); });
+    for (var i = 0; i < keys.length; i++) {
+      snapshot.inventory[dn(keys[i])] = inv[keys[i]];
+    }
+    return snapshot;
+  }
+
+  function downloadExport() {
+    var data = JSON.stringify(exportInventory(), null, 2);
+    var blob = new Blob([data], {type: 'application/json'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'beetle_inventory_' + new Date().toISOString().replace(/[:.]/g,'-').substring(0,19) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    logEvent('Inventory exported');
+  }
+
+  // Auto-append to log file on each full scan (via console for easy copy)
+  function logInventorySnapshot() {
+    var snap = exportInventory();
+    console.log('[BeetleCoach] Inventory snapshot:', JSON.stringify(snap));
+  }
+
   /* ─── Helpers ─── */
   function norm(raw) {
     if (!raw) { return null; }
@@ -442,7 +487,8 @@
       }
     } finally { _scanning = false; }
     parseTimers(); parseHammer(); parseLevel(); parseCraftMode();
-    S.lastFullScan = Date.now(); S.lastPassiveScan = Date.now(); save(); renderPanel();
+    S.lastFullScan = Date.now(); S.lastPassiveScan = Date.now(); save();
+    logInventorySnapshot(); renderPanel();
   }
 
   /* ─── Passive inventory refresh (no pagination, visibility-gated) ─── */
@@ -725,12 +771,94 @@
     return vi;
   }
 
+  /* ─── Goal-Directed Progression Engine ─── */
+  // The full collection path, ordered by dependency chain:
+  // Each goal: what beetle/flower is missing, what recipe makes it, what the prereqs are
+  var PROGRESSION_CHAIN = [
+    // Adamantine beetles (Stage 4)
+    {key:'goliath',recipe:'Goliath Beetle',inputs:['pinecone','pond'],prereqs:['pinecone'],via:'Mithril Bridge for Pinecone'},
+    {key:'stag',recipe:'Stag Beetle',inputs:['moss','pond'],prereqs:['moss'],via:'Mithril Bridge for Moss'},
+    {key:'bombardier',recipe:'Bombardier Beetle',inputs:['gunpowder','pond'],prereqs:['gunpowder'],via:'Mithril Bridge for Gunpowder'},
+    // Epic beetles (Stage 6) — need Adamantine flowers
+    {key:'sunset_moth',recipe:'Sunset Moth',inputs:['gazania','goliath'],prereqs:['gazania','goliath'],via:'Transmute Gazania (Green + Adamantine beetle + Junk Cube)'},
+    // Endgame
+    {key:'black_lotus',recipe:'Black Lotus',inputs:['gunpowder','moss','pinecone'],prereqs:['gunpowder','moss','pinecone'],via:'Need all 3 Mithril artifacts (3+ bridge runs)'},
+    {key:'mars_rhino',recipe:'Mars Rhino Beetle',inputs:['black_lotus','sunset_moth','sabertooth_longhorn'],prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'Need Black Lotus + Sunset Moth + Sabertooth'},
+    {key:'hercules',recipe:'Hercules Beetle',inputs:['golden_scarab','pollen_adamantine','purple'],prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab is drop-only. Need 2 Adamantine flowers for pollen.'}
+  ];
+
+  // Find the NEXT progression goal and what concrete step advances it
+  function getProgressionMove(inv) {
+    for (var ci = 0; ci < PROGRESSION_CHAIN.length; ci++) {
+      var goal = PROGRESSION_CHAIN[ci];
+      if ((inv[goal.key]||0) > 0) { continue; } // Already have this
+
+      // Check which prereqs are missing
+      var missingPrereqs = [];
+      for (var pi = 0; pi < goal.prereqs.length; pi++) {
+        if (!(inv[goal.prereqs[pi]]||0)) { missingPrereqs.push(goal.prereqs[pi]); }
+      }
+
+      if (missingPrereqs.length === 0 && canMake(RECIPES.find(function(r){return r.label===goal.recipe;})||{inputs:[]}, inv)) {
+        // Can craft the goal directly!
+        return {type:'direct', goal:goal.key, label:goal.recipe, reason:'Progression: craft ' + dn(goal.key)};
+      }
+
+      // Find a craftable step that produces a missing prereq
+      for (var mi = 0; mi < missingPrereqs.length; mi++) {
+        var needed = missingPrereqs[mi];
+        var PREREQ_RECIPES = {
+          'pinecone':'Pinecone / Moss / Gunpowder Bridge','moss':'Pinecone / Moss / Gunpowder Bridge',
+          'gunpowder':'Pinecone / Moss / Gunpowder Bridge',
+          'nectar':'Nectar / Cattail Bridge','cattail':'Nectar / Cattail Bridge',
+          'pollen_tin':'Tin Pollen','pollen_bronze':'Bronze Pollen',
+          'pollen_mithril':'Mithril Pollen','pollen_adamantine':'Adamantine Pollen'
+        };
+        var prereqLabel = PREREQ_RECIPES[needed];
+        if (prereqLabel) {
+          var prereqRecipe = RECIPES.find(function(r){return r.label===prereqLabel;});
+          if (prereqRecipe && canMake(prereqRecipe, inv) && !wouldConsumeLastCollectible(prereqRecipe, inv)) {
+            return {type:'prereq', goal:goal.key, label:prereqLabel, reason:'For ' + dn(goal.key) + ': craft ' + prereqLabel, target:goal.recipe, produces:needed};
+          }
+        }
+      }
+
+      // Can't advance this goal right now — report what's blocking
+      return {type:'blocked', goal:goal.key, label:goal.recipe, reason:'Need: ' + missingPrereqs.map(dn).join(', '), via:goal.via};
+    }
+    return null; // All goals complete!
+  }
+
   function getActionPlans(inv) {
     if (isStale()) { return []; }
     var plans = [];
     var directCrafts = getDirectCrafts(inv);
 
-    // Phase 1: Direct crafts
+    // Phase 0: Goal-directed progression move (highest priority)
+    var progMove = getProgressionMove(inv);
+    if (progMove && (progMove.type === 'direct' || progMove.type === 'prereq')) {
+      var progRecipe = RECIPES.find(function(r){return r.label === progMove.label;});
+      if (progRecipe) {
+        var progValue = (RECIPE_VALUE[progMove.label]||5) + 20; // Boost progression moves
+        if (progMove.type === 'prereq' && progMove.target) {
+          // 2-step plan: prereq then goal
+          plans.push({
+            goal: dn(progMove.goal), value: progValue, type: '2-step', progression: true,
+            steps: [
+              { label: progMove.label, inputs: progRecipe.inputs.map(tokHuman).join(' + '), ready: true, note: progRecipe.type === 'smash' ? 'RNG' : null, produces: progMove.produces },
+              { label: progMove.target, inputs: progMove.reason, ready: false }
+            ]
+          });
+        } else {
+          plans.push({
+            goal: dn(progMove.goal), value: progValue, type: 'direct', progression: true,
+            steps: [{ label: progMove.label, inputs: progRecipe.inputs.map(tokHuman).join(' + '), ready: true }]
+          });
+        }
+      }
+    }
+
+    // Phase 1: Direct crafts (fill remaining slots)
     for (var di = 0; di < directCrafts.length; di++) {
       var r = directCrafts[di];
       var value = RECIPE_VALUE[r.label] || 5;
@@ -970,6 +1098,7 @@
     h += '<button class="bc8-btn ' + (S.autoHunt ? 'on' : '') + '" id="bc8-ah">Hunt ' + (S.autoHunt ? 'ON' : 'OFF') + '</button>';
     h += '<button class="bc8-btn" id="bc8-mc">Miladychan</button>';
     h += '<button class="bc8-btn" id="bc8-wk">Wiki</button>';
+    h += '<button class="bc8-btn" id="bc8-exp">Export</button>';
     h += '<button class="bc8-btn" id="bc8-rst" style="color:#c0392b;border-color:#e6b0aa;">Reset</button>';
     h += '</div>';
 
@@ -1001,7 +1130,8 @@
       for (var pi = 0; pi < plans.length; pi++) {
         var p = plans[pi];
         var fragileTag = p.fragile ? ' <span style="color:#e67e22;font-size:9px;">(verify qty)</span>' : '';
-        h += '<div class="bc8-best-item"><div class="bc8-best-name">' + (pi+1) + '. ' + p.goal + fragileTag + '</div>';
+        var progTag = p.progression ? ' <span class="bc8-badge bc8-fresh-ok" style="margin-left:4px;">GOAL</span>' : '';
+        h += '<div class="bc8-best-item"><div class="bc8-best-name">' + (pi+1) + '. ' + p.goal + progTag + fragileTag + '</div>';
         for (var si = 0; si < p.steps.length; si++) {
           var step = p.steps[si];
           var check = step.ready ? '\u2705' : '\u{1F536}';
@@ -1014,6 +1144,13 @@
         }
         h += '</div>';
       }
+    }
+    // Show blocked progression goal if the top move isn't progression
+    if (progMove && progMove.type === 'blocked') {
+      h += '<div class="bc8-muted" style="margin-top:4px;padding-top:4px;border-top:1px solid #e8f4f7;">';
+      h += '<b>Goal: ' + dn(progMove.goal) + '</b> \u2014 ' + progMove.reason;
+      if (progMove.via) { h += '<br><span style="color:#5b8dd9;">\u2192 ' + progMove.via + '</span>'; }
+      h += '</div>';
     }
     h += '</div>';
 
@@ -1142,6 +1279,7 @@
     document.getElementById('bc8-ah').addEventListener('click', function() { S.autoHunt = !S.autoHunt; save(); renderPanel(); });
     document.getElementById('bc8-mc').addEventListener('click', function() { window.open('https://boards.miladychan.org/v/324142','_blank'); });
     document.getElementById('bc8-wk').addEventListener('click', function() { window.open('https://beetle.wiki/doku.php?id=start','_blank'); });
+    document.getElementById('bc8-exp').addEventListener('click', function() { downloadExport(); });
     document.getElementById('bc8-rst').addEventListener('click', function() {
       if (confirm('Clear all data and rescan?')) { resetStore(); fullScan(); }
     });
@@ -1208,7 +1346,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v9.1] booted');
+    console.log('[BeetleCoach v9.2] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
