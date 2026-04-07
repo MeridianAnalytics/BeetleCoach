@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.2.0
+// @version      8.3.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '8.2.0';
+  const CURRENT_VER = '8.3.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -1068,7 +1068,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v8.2] booted');
+    console.log('[BeetleCoach v8.3] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
