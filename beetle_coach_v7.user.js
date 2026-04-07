@@ -217,7 +217,7 @@
   function defaults() {
     return {ver:CURRENT_VER,mergedInventory:{},currentHammer:null,ownedHammers:[],
       currentHammerBonus:null,currentHammerBreakChance:null,
-      timers:{},lastScanTime:0,autoClaim:true,autoHunt:false,panelOpen:true,level:null,craftMode:null,
+      timers:{},lastFullScan:0,lastPassiveScan:0,autoClaim:true,autoHunt:false,panelOpen:true,level:null,craftMode:null,
       log:[]};
   }
   function load() {
@@ -397,27 +397,34 @@
       }
     } finally { _scanning = false; }
     parseTimers(); parseHammer(); parseLevel(); parseCraftMode();
-    S.lastScanTime = Date.now(); save(); renderPanel();
+    S.lastFullScan = Date.now(); S.lastPassiveScan = Date.now(); save(); renderPanel();
   }
 
-  /* ─── FIX 2: Passive inventory refresh (no pagination, visibility-gated) ─── */
+  /* ─── Passive inventory refresh (no pagination, visibility-gated) ─── */
+  // Passive scans only CONFIRM existing items, never inflate authoritative inventory
   function passiveScan() {
     if (_scanning) { return; }
-    if (document.hidden) { return; } // Tab not visible
-    // Only scan if game modules exist in DOM
+    if (document.hidden) { return; }
     var hasGame = document.querySelector('.crafting-module__beetle-item') || document.querySelector('.beetle-catch-module__beetle-item');
     if (!hasGame) { return; }
-    // Quick scan visible page only, merge into existing
     var vis = {};
     var merge = function(items) { for (var k in items) { vis[k] = Math.max(vis[k]||0, items[k]); } };
     merge(scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
     merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
     if (Object.keys(vis).length > 0) {
-      var m = Object.assign({}, S.mergedInventory);
-      for (var k in vis) { m[k] = Math.max(m[k]||0, vis[k]); }
-      S.mergedInventory = m;
-      S.lastScanTime = Date.now();
-      save();
+      // Only update counts for items already known from full scan
+      // Never add new items from passive scan (prevents phantom ratcheting)
+      var updated = false;
+      for (var k in vis) {
+        if (S.mergedInventory.hasOwnProperty(k)) {
+          if (vis[k] !== S.mergedInventory[k]) {
+            S.mergedInventory[k] = vis[k]; // Update to current visible count
+            updated = true;
+          }
+        }
+      }
+      S.lastPassiveScan = Date.now();
+      if (updated) { save(); }
     }
     parseTimers(); parseHammer();
   }
@@ -434,11 +441,12 @@
     var bc = document.getElementById('bc8-t-claim'); if (bc) { bc.innerHTML = fmtT(S.timers.beetleCatch); }
     var hc = document.getElementById('bc8-t-hunt'); if (hc) { hc.innerHTML = fmtT(S.timers.huntCooldown); }
     var dc = document.getElementById('bc8-t-cheese'); if (dc) { dc.innerHTML = fmtT(S.timers.dailyCheese); }
-    // Update freshness chip
+    // Update freshness chip (three-band)
     var fc = document.getElementById('bc8-fresh'); if (fc) {
-      var stale = isStale();
-      fc.className = 'bc8-badge ' + (stale ? 'bc8-stale' : 'bc8-fresh-ok');
-      fc.textContent = stale ? 'STALE' : scanAge();
+      var conf = scanConfidence();
+      var cls = conf === 'fresh' ? 'bc8-fresh-ok' : (conf === 'warming' ? 'bc8-warming' : 'bc8-stale');
+      fc.className = 'bc8-badge ' + cls;
+      fc.textContent = conf === 'stale' ? 'STALE' : (conf === 'warming' ? scanAge() + ' ~' : scanAge());
     }
   }
 
@@ -498,10 +506,19 @@
   }
 
   /* ─── Staleness ─── */
-  function isStale() { return !S.lastScanTime || (Date.now() - S.lastScanTime > STALE_THRESHOLD); }
+  // Three-band confidence: fresh (full scan recent), warming (passive recent), stale (nothing recent)
+  function scanConfidence() {
+    var now = Date.now();
+    var fullAge = now - (S.lastFullScan || 0);
+    var passiveAge = now - (S.lastPassiveScan || 0);
+    if (fullAge < STALE_THRESHOLD) { return 'fresh'; }
+    if (passiveAge < STALE_THRESHOLD) { return 'warming'; }
+    return 'stale';
+  }
+  function isStale() { return scanConfidence() === 'stale'; }
   function scanAge() {
-    if (!S.lastScanTime) { return 'never'; }
-    var s = Math.round((Date.now() - S.lastScanTime) / 1000);
+    if (!S.lastFullScan) { return 'never'; }
+    var s = Math.round((Date.now() - S.lastFullScan) / 1000);
     if (s < 60) { return s + 's'; }
     return Math.round(s/60) + 'm';
   }
@@ -566,20 +583,42 @@
     }).sort(function(a,b) { return (RECIPE_VALUE[b.label]||5) - (RECIPE_VALUE[a.label]||5); });
   }
 
-  /* ─── FIX 3: Smart group consumption (duplicates before singletons, non-collectibles first) ─── */
+  /* ─── Smart group consumption: strategic preference within groups ─── */
+  // Lower = consume first (cheaper/more expendable)
+  var STRATEGIC_VALUE = {
+    // Bronze beetles: Ladybug is cheaper to use than Purple (Purple has more high-tier recipe utility)
+    ladybug: 1, purple: 3,
+    // Mithril beetles: both are bottlenecks, equal
+    pond: 5, monarch: 5,
+    // Mithril flowers: Royal Poinciana/Camellia/Morning Glory all similar
+    royal_poinciana: 4, camellia: 4, morning_glory: 4,
+    // Bronze flowers
+    marigold: 2, gallic_rose: 2, milk_thistle: 2,
+    // Adamantine flowers
+    pincushion: 6, gazania: 6
+  };
   function consumeInputs(vInv, recipe) {
     var vi = Object.assign({}, vInv);
     for (var i = 0; i < recipe.inputs.length; i++) {
       var token = recipe.inputs[i];
       var group = TOKEN_GROUPS[token];
       if (group) {
-        // Sort group: prefer non-collectibles, then highest quantity, then non-singletons
         var available = group.filter(function(k) { return (vi[k]||0) > 0; });
         available.sort(function(a,b) {
+          // 1. Non-collectibles before collectibles
           var aCol = COLLECTIBLES.has(a) ? 1 : 0;
           var bCol = COLLECTIBLES.has(b) ? 1 : 0;
-          if (aCol !== bCol) { return aCol - bCol; } // non-collectible first
-          return (vi[b]||0) - (vi[a]||0); // highest qty first (consume from abundance)
+          if (aCol !== bCol) { return aCol - bCol; }
+          // 2. Duplicates before singletons (never consume last copy)
+          var aSingle = (vi[a]||0) <= 1 ? 1 : 0;
+          var bSingle = (vi[b]||0) <= 1 ? 1 : 0;
+          if (aSingle !== bSingle) { return aSingle - bSingle; }
+          // 3. Lower strategic value first (expendable before precious)
+          var aVal = STRATEGIC_VALUE[a] || 0;
+          var bVal = STRATEGIC_VALUE[b] || 0;
+          if (aVal !== bVal) { return aVal - bVal; }
+          // 4. Highest quantity first (consume from abundance)
+          return (vi[b]||0) - (vi[a]||0);
         });
         if (available.length > 0) { vi[available[0]]--; }
       } else {
@@ -750,7 +789,7 @@
       '.bc8-strip-item{display:flex;align-items:center;gap:3px;}',
       '.bc8-strip-label{color:#6b8a90;font-weight:600;}',
       '.bc8-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:700;}',
-      '.bc8-ready{background:#d4edda;color:#155724;}.bc8-countdown{background:#fff3cd;color:#856404;}.bc8-stale{background:#f8d7da;color:#721c24;}.bc8-fresh-ok{background:#d4edda;color:#155724;}',
+      '.bc8-ready{background:#d4edda;color:#155724;}.bc8-countdown{background:#fff3cd;color:#856404;}.bc8-stale{background:#f8d7da;color:#721c24;}.bc8-fresh-ok{background:#d4edda;color:#155724;}.bc8-warming{background:#fff3cd;color:#856404;}',
       '.bc8-card{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:10px;flex-shrink:0;}',
       '.bc8-focus{background:#f0f9fb;border:1px solid #b8e6ec;border-radius:10px;padding:12px;flex-shrink:0;}',
       '.bc8-scroll{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:10px;overflow-y:auto;overflow-x:hidden;flex-shrink:1;flex-grow:0;min-height:30px;}',
@@ -790,7 +829,10 @@
     // Header with freshness chip
     var cheeseStr = inv.cheese ? inv.cheese.toLocaleString() : '';
     h += '<div class="bc8-header"><span class="bc8-title"><span id="bc8-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach</span>';
-    h += '<span class="bc8-sub">' + (S.level ? 'Lv.' + S.level : '') + (cheeseStr ? ' \u00B7 ' + cheeseStr + ' \u{1F9C0}' : '') + ' \u00B7 <span id="bc8-fresh" class="bc8-badge ' + (stale ? 'bc8-stale' : 'bc8-fresh-ok') + '">' + (stale ? 'STALE' : scanAge()) + '</span></span></div>';
+    var conf = scanConfidence();
+    var freshCls = conf === 'fresh' ? 'bc8-fresh-ok' : (conf === 'warming' ? 'bc8-warming' : 'bc8-stale');
+    var freshTxt = conf === 'stale' ? 'STALE' : (conf === 'warming' ? scanAge() + ' ~' : scanAge());
+    h += '<span class="bc8-sub">' + (S.level ? 'Lv.' + S.level : '') + (cheeseStr ? ' \u00B7 ' + cheeseStr + ' \u{1F9C0}' : '') + ' \u00B7 <span id="bc8-fresh" class="bc8-badge ' + freshCls + '">' + freshTxt + '</span></span></div>';
 
     // Buttons
     h += '<div class="bc8-btns">';
