@@ -1102,6 +1102,7 @@
     var timers = S.timers || {};
     var stale = isStale();
     var plans = getActionPlans(inv);
+    var progMove = stale ? null : getProgressionMove(inv);
     var directCrafts = stale ? [] : getDirectCrafts(inv);
     var fmtT = function(v) {
       if (!v) { return '\u2014'; }
