@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      11.1.0
+// @version      11.2.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '11.1.0';
+  const CURRENT_VER = '11.2.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -1198,6 +1198,28 @@
     return false;
   }
 
+  // Detect stuck "PROCESSING..." state and auto-refresh
+  var _stuckSince = 0;
+  function checkStuckState() {
+    var claimBtn = document.querySelector('.beetle-catch-module__catch-button');
+    var huntBtn = document.querySelector('.beetle-catch-module__hunt-button');
+    var isStuck = (claimBtn && claimBtn.classList.contains('loading')) ||
+                  (huntBtn && huntBtn.classList.contains('loading'));
+    if (isStuck) {
+      if (!_stuckSince) { _stuckSince = Date.now(); }
+      if (Date.now() - _stuckSince > 30000) {
+        logEvent('Game stuck on PROCESSING — refreshing page...');
+        save();
+        _stuckSince = 0;
+        window.location.reload();
+        return true;
+      }
+    } else {
+      _stuckSince = 0;
+    }
+    return false;
+  }
+
   // Returns true if action was taken (caller should stop processing other actions)
   function tryAutoClaim() {
     if (!S.autoClaim || _scanning) { return false; }
@@ -1597,13 +1619,14 @@
     fullScan();
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
-    // Only fire ONE action per cycle to prevent simultaneous clicks
+    // Only fire ONE action per cycle; check for stuck game state first
     _intervals.push(setInterval(function() {
+      if (checkStuckState()) { return; } // Game stuck, refreshing
       if (tryAutoClaim()) { return; }
       if (tryAutoHunt()) { return; }
       tryClaimCheese();
     }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v11.1] booted');
+    console.log('[BeetleCoach v11.2] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
