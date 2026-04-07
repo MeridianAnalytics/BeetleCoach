@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      10.9.0
+// @version      11.0.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '10.9.0';
+  const CURRENT_VER = '11.0.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -1168,19 +1168,22 @@
       _pendingFullScan = setTimeout(function() {
         _pendingFullScan = null;
         if (!_scanning) { fullScan(); }
-      }, 30000);
+      }, 8000); // 8s delayed full scan for authoritative truth
     }, delay);
   }
 
-  // Navigate to beetle cartridge if needed — only navigates once, then waits for page reload
-  var _navigatingToBeetle = false;
-  function ensureBeetlePage(reason) {
-    if (window.location.href.indexOf('cartridge=beetle') > -1) { return true; }
-    if (_navigatingToBeetle) { return false; } // Already navigating, wait for reload
-    _navigatingToBeetle = true;
-    logEvent('Navigating to beetle cartridge for ' + reason + '...');
+  // Generalized cartridge navigation — navigates once, waits for reload
+  var _navigating = false;
+  function ensureCartridge(cartridge, reason) {
+    if (window.location.href.indexOf('cartridge=' + cartridge) > -1) {
+      _navigating = false; // We're here, clear flag
+      return true;
+    }
+    if (_navigating) { return false; }
+    _navigating = true;
+    logEvent('Navigating to ' + cartridge + ' for ' + reason + '...');
     save();
-    window.location.href = 'https://www.remilia.net/home?cartridge=beetle';
+    window.location.href = 'https://www.remilia.net/home?cartridge=' + cartridge;
     return false;
   }
 
@@ -1188,9 +1191,11 @@
   function tryAutoClaim() {
     if (!S.autoClaim || _scanning) { return false; }
     if (Date.now() - _lastClaimTime < 30000) { return false; }
+    // Check nav bar — is claim ready?
     var navBC = document.querySelector('.beetle-game-nav .info');
     if (!navBC || !/ready/i.test(navBC.textContent)) { return false; }
-    if (!ensureBeetlePage('claim')) { return true; } // Navigating counts as "action taken"
+    // Navigate to beetle cartridge
+    if (!ensureCartridge('beetle', 'claim')) { return true; }
     var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
@@ -1199,7 +1204,7 @@
       S.session.claims++;
       logEvent('Auto-claimed beetle!');
       save();
-      postActionRefresh('Post-claim', 12000);
+      postActionRefresh('Post-claim', 10000);
       return true;
     }
     return false;
@@ -1210,9 +1215,11 @@
     if (cheese < HUNT_COST) { return false; }
     if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return false; }
     if (Date.now() - _lastHuntTime < 15000) { return false; }
+    // Check hunt isn't on cooldown
     var huntCostEl = document.querySelector('.beetle-catch-module__hunt-button-cheese-cost');
     if (huntCostEl && /cooldown/i.test(huntCostEl.textContent)) { return false; }
-    if (!ensureBeetlePage('hunt')) { return true; }
+    // Navigate to beetle cartridge
+    if (!ensureCartridge('beetle', 'hunt')) { return true; }
     var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
@@ -1227,18 +1234,23 @@
     return false;
   }
   function tryClaimCheese() {
-    if (_scanning) { return; }
-    if (Date.now() - _lastCheeseTime < 60000) { return; }
+    if (_scanning) { return false; }
+    if (Date.now() - _lastCheeseTime < 60000) { return false; }
+    // Check nav bar — is cheese ready?
     var navCheese = document.querySelector('.cheese-claim-nav .info');
-    if (!navCheese || !/ready/i.test(navCheese.textContent)) { return; }
+    if (!navCheese || !/ready/i.test(navCheese.textContent)) { return false; }
+    // Navigate to cheese cartridge
+    if (!ensureCartridge('cheese', 'daily cheese')) { return true; }
     var btn = document.querySelector('.claim-button:not(.disabled)');
     if (btn) {
       btn.click(); _lastCheeseTime = Date.now();
       S.session.cheeseClaims++;
-      logEvent('Auto-claimed daily cheese! Refreshing in 8s...');
+      logEvent('Auto-claimed daily cheese!');
       save();
       postActionRefresh('Post-cheese', 8000);
+      return true;
     }
+    return false;
   }
 
   /* ─── FIX 5 + 6 + 7: Styles with status strip, freshness chip, timer badges, hammer honesty ─── */
@@ -1569,6 +1581,7 @@
     _booted = true;
     _intervals.forEach(function(id) { clearInterval(id); });
     _intervals = [];
+    _navigating = false; // Reset nav flag on boot
     ensureUI();
     fullScan();
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
@@ -1579,7 +1592,7 @@
       if (tryAutoHunt()) { return; }
       tryClaimCheese();
     }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v10.9] booted');
+    console.log('[BeetleCoach v11.0] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
