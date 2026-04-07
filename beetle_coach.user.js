@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      11.0.0
+// @version      11.1.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '11.0.0';
+  const CURRENT_VER = '11.1.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -735,15 +735,25 @@
   }
 
   /* ─── Recommendation Engine ─── */
+  // Pollen/transmute recipes that deliberately consume flowers
+  var FLOWER_CONSUMING_RECIPES = new Set([
+    'Tin Pollen','Bronze Pollen','Mithril Pollen','Adamantine Pollen',
+    'Bronze Flower Transmute','Mithril Flower Transmute'
+  ]);
+
   function wouldConsumeLastCollectible(recipe, inv) {
+    // In Flowers mode, allow pollen/transmute recipes to consume singleton flowers
+    // That's the explicit purpose of Flowers strategy
+    if (S.strategy === 'flowers' && FLOWER_CONSUMING_RECIPES.has(recipe.label)) {
+      return false; // Let it through
+    }
+
     for (var i = 0; i < recipe.inputs.length; i++) {
       var token = recipe.inputs[i];
       var group = TOKEN_GROUPS[token];
       if (group) {
-        // FIX 3: Check if the member that WOULD be consumed is a singleton collectible
         for (var gi = 0; gi < group.length; gi++) {
           if ((inv[group[gi]]||0) > 0 && COLLECTIBLES.has(group[gi]) && (inv[group[gi]]||0) <= 1) {
-            // Check if there's a non-singleton alternative in the group
             var hasAlt = false;
             for (var ai = 0; ai < group.length; ai++) {
               if (ai !== gi && (inv[group[ai]]||0) > 1) { hasAlt = true; break; }
@@ -754,7 +764,6 @@
       } else if (COLLECTIBLES.has(token) && (inv[token]||0) <= 1) {
         return true;
       }
-      // Also protect endgame ingredients
       if (!group && isProtectedForGoal(token, inv)) { return true; }
     }
     return false;
@@ -895,9 +904,11 @@
     {key:'hercules',recipe:'Hercules Beetle',prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab is drop-only (Diamond rarity)'}
   ];
 
-  // BROAD: Collect EVERY missing beetle and flower. Complete the full collection.
-  // Includes Adamantine trio, Rare beetles, Epic beetles, all flowers, endgame.
+  // BROAD: Collect EVERY missing beetle and flower. Prioritize what's closest to craftable.
+  // Different from Endgame: includes ALL missing items, not just Mars Rhino path.
   var BROAD_CHAIN = [
+    // Bronze pollen first (powers everything downstream)
+    {key:'pollen_bronze',recipe:'Bronze Pollen',prereqs:[],via:'Assemble 2 Bronze flowers', minQty:3},
     // Adamantine beetles — all 3
     {key:'goliath',recipe:'Goliath Beetle',prereqs:['pinecone'],via:'Mithril Bridge (RNG) for Pinecone'},
     {key:'stag',recipe:'Stag Beetle',prereqs:['moss'],via:'Mithril Bridge (RNG) for Moss'},
@@ -1592,7 +1603,7 @@
       if (tryAutoHunt()) { return; }
       tryClaimCheese();
     }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v11.0] booted');
+    console.log('[BeetleCoach v11.1] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
