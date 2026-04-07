@@ -730,37 +730,40 @@
 
   /* ─── FIX 4: Auto-Claim / Hunt / Cheese with explicit logging ─── */
   var _lastClaimTime = 0, _lastHuntTime = 0, _lastCheeseTime = 0;
+  // After claim/hunt/cheese: wait for game to process, then refresh page for clean state
+  function postActionRefresh(reason, delay) {
+    setTimeout(function() {
+      logEvent(reason + ' — refreshing page...');
+      save(); // Persist state before refresh
+      window.location.reload();
+    }, delay);
+  }
+
   function tryAutoClaim() {
     if (!S.autoClaim || _scanning) { return; }
-    if (Date.now() - _lastClaimTime < 60000) { return; } // 60s debounce
+    if (Date.now() - _lastClaimTime < 60000) { return; }
     var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
-      // Double-check button text doesn't show timer
       var btnText = btn.textContent || '';
-      if (/\d+[mhMs]\s/i.test(btnText)) { return; } // Has a countdown, not actually ready
+      if (/\d+[mhMs]\s/i.test(btnText)) { return; }
       btn.click(); _lastClaimTime = Date.now();
-      logEvent('Auto-claimed beetle! Waiting 15s for reward...');
-      setTimeout(function() { logEvent('Post-claim scan'); fullScan(); }, 15000);
+      logEvent('Auto-claimed beetle! Refreshing in 12s...');
+      postActionRefresh('Post-claim', 12000);
     }
   }
   function tryAutoHunt() {
     if (!S.autoHunt || _scanning) { return; }
     var cheese = S.mergedInventory.cheese || 0;
-    if (cheese < HUNT_COST) {
-      return; // Can't afford
-    }
-    if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) {
-      return; // Would breach reserve
-    }
-    if (Date.now() - _lastHuntTime < 90000) { return; } // 90s between hunts — game needs time to process
+    if (cheese < HUNT_COST) { return; }
+    if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return; }
+    if (Date.now() - _lastHuntTime < 90000) { return; }
     var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
-      // Double-check the button text doesn't show cooldown
       var btnText = btn.textContent || '';
       if (/cooldown/i.test(btnText)) { return; }
       btn.click(); _lastHuntTime = Date.now();
-      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese). Waiting 15s for result...');
-      setTimeout(function() { logEvent('Post-hunt scan'); fullScan(); }, 15000);
+      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese). Refreshing in 12s...');
+      postActionRefresh('Post-hunt', 12000);
     }
   }
   function tryClaimCheese() {
@@ -771,8 +774,8 @@
     var btn = document.querySelector('.claim-button:not(.disabled)');
     if (btn) {
       btn.click(); _lastCheeseTime = Date.now();
-      logEvent('Auto-claimed daily cheese!');
-      setTimeout(function() { logEvent('Post-cheese scan'); fullScan(); }, 5000);
+      logEvent('Auto-claimed daily cheese! Refreshing in 8s...');
+      postActionRefresh('Post-cheese', 8000);
     }
   }
 
