@@ -265,6 +265,9 @@
   const PFP_HASH = /^(pfp_\d+|retart|remilio|radbro|default|[a-f0-9]{20,})$/i;
 
   /* ─── Store with migration ─── */
+  function defaultSession() {
+    return {claims:0,hunts:0,cheeseClaims:0,cheeseGained:0,gains:[],totalXP:0,startTime:Date.now()};
+  }
   function defaults() {
     return {ver:CURRENT_VER,mergedInventory:{},currentHammer:null,ownedHammers:[],brokenHammers:[],discoveredHammers:[],
       currentHammerBonus:null,currentHammerBreakChance:null,
@@ -272,7 +275,29 @@
       strategy:'endgame', // 'endgame' | 'broad' | 'flowers'
       log:[],
       stuckSince:0,stuckRefreshCount:0,
-      session:{claims:0,hunts:0,cheeseClaims:0,cheeseGained:0,gains:[],totalXP:0,startTime:Date.now()}};
+      session:defaultSession()};
+  }
+  function normalizeSession(rawSession) {
+    var session = Object.assign(defaultSession(), rawSession || {});
+    var gains = [];
+    if (Array.isArray(session.gains)) {
+      gains = session.gains.slice();
+    } else if (session.gains && typeof session.gains === 'object') {
+      Object.keys(session.gains).forEach(function(name) {
+        var count = parseInt(session.gains[name], 10) || 0;
+        for (var i = 0; i < count; i++) { gains.push(name); }
+      });
+    } else if (Array.isArray(session.beetles)) {
+      gains = session.beetles.slice();
+    }
+    session.claims = parseInt(session.claims, 10) || 0;
+    session.hunts = parseInt(session.hunts, 10) || 0;
+    session.cheeseClaims = parseInt(session.cheeseClaims, 10) || 0;
+    session.cheeseGained = parseInt(session.cheeseGained, 10) || 0;
+    session.totalXP = parseInt(session.totalXP, 10) || 0;
+    if (!session.startTime || !isFinite(session.startTime)) { session.startTime = Date.now(); }
+    session.gains = gains;
+    return session;
   }
   function load() {
     try {
@@ -287,7 +312,9 @@
         }
       }
       if (!raw) { return defaults(); }
-      var p = Object.assign(defaults(), JSON.parse(raw));
+      var parsed = JSON.parse(raw);
+      var p = Object.assign(defaults(), parsed);
+      p.session = normalizeSession((parsed || {}).session);
       // Only wipe inventory on major version change (e.g. 9.x -> 10.x), not patches
       var oldMajor = (p.ver || '0').split('.')[0];
       var newMajor = CURRENT_VER.split('.')[0];
@@ -1267,6 +1294,50 @@
     return false;
   }
 
+  function isVisible(el) {
+    return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+  }
+
+  function preferCatchView(reason) {
+    var catchModule = document.querySelector('.beetle-catch-module');
+    var catchBtn = document.querySelector('.beetle-catch-module__catch-button');
+    var huntBtn = document.querySelector('.beetle-catch-module__hunt-button');
+    if (isVisible(catchBtn) || isVisible(huntBtn) || isVisible(catchModule)) { return false; }
+    var nav = document.querySelector('.beetle-game-nav');
+    if (!nav) { return false; }
+    logEvent('Switching to Beetle Catch for ' + reason + '...');
+    nav.click();
+    return true;
+  }
+
+  function runPriorityActions() {
+    if (checkStuckState()) { return true; }
+    if (tryAutoClaim()) { return true; }
+    if (tryAutoHunt()) { return true; }
+    return tryClaimCheese();
+  }
+
+  function kickoffPriorityScan(reason, opts) {
+    opts = opts || {};
+    if (!ensureCartridge('beetle', reason)) { return true; }
+    var craftModule = document.querySelector('.crafting-module');
+    var craftVisible = isVisible(craftModule);
+    if (opts.primeHammer !== false) {
+      parseHammer();
+      save();
+    }
+    if (preferCatchView(reason)) {
+      setTimeout(function() { kickoffPriorityScan(reason, Object.assign({}, opts, {primeHammer:false})); }, craftVisible ? 600 : 1000);
+      return true;
+    }
+    parseTimers();
+    parseLevel();
+    parseCraftMode();
+    if (!opts.skipActions && runPriorityActions()) { return true; }
+    fullScan();
+    return true;
+  }
+
   /*
    * GAME BEHAVIOR NOTE: The BeetleBoy game can enter a "PROCESSING..." state
    * where claim/hunt buttons show "loading" CSS class and "PROCESSING..." text.
@@ -1688,7 +1759,7 @@
     panel.innerHTML = h;
 
     // Bind buttons
-    document.getElementById('bc8-fs').addEventListener('click', function() { fullScan(); });
+    document.getElementById('bc8-fs').addEventListener('click', function() { kickoffPriorityScan('manual scan'); });
     document.getElementById('bc8-ac').addEventListener('click', function() { S.autoClaim = !S.autoClaim; save(); renderPanel(); });
     document.getElementById('bc8-ah').addEventListener('click', function() { S.autoHunt = !S.autoHunt; save(); renderPanel(); });
     document.getElementById('bc8-mc').addEventListener('click', function() { window.open('https://boards.miladychan.org/v/324142','_blank'); });
@@ -1755,16 +1826,11 @@
     _intervals = [];
     _navigating = false; // Reset nav flag on boot
     ensureUI();
-    fullScan();
+    kickoffPriorityScan('startup');
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
-    // Only fire ONE action per cycle; check for stuck game state first
-    _intervals.push(setInterval(function() {
-      if (checkStuckState()) { return; } // Game stuck, refreshing
-      if (tryAutoClaim()) { return; }
-      if (tryAutoHunt()) { return; }
-      tryClaimCheese();
-    }, ACTION_INTERVAL));
+    // Only fire ONE action per cycle, and always prioritize claim/hunt over scans
+    _intervals.push(setInterval(runPriorityActions, ACTION_INTERVAL));
     console.log('[BeetleCoach v11.5] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
