@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.9.0
+// @version      9.0.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '8.9.0';
+  const CURRENT_VER = '9.0.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -621,13 +621,20 @@
   var NEEDED_AS_INGREDIENT = new Set(['sabertooth_longhorn','sunset_moth','black_lotus']);
   // Protect one copy of endgame ingredients if higher goals are still missing
   function isProtectedForGoal(key, inv) {
-    // If Mars Rhino missing, protect one each of its ingredients
+    // Midgame: protect Pond/Monarch while Adamantine beetles still incomplete
+    var needsAdamantine = !(inv['bombardier']||0) || !(inv['stag']||0) || !(inv['goliath']||0);
+    if (needsAdamantine) {
+      if ((key === 'pond' || key === 'monarch') && (inv[key]||0) <= 2) {
+        return true; // Keep at least 2 of each for progression recipes
+      }
+    }
+    // Endgame: protect Mars Rhino ingredients
     if (!(inv['mars_rhino']||0)) {
       if ((key === 'black_lotus' || key === 'sunset_moth' || key === 'sabertooth_longhorn') && (inv[key]||0) <= 1) {
         return true;
       }
     }
-    // If Hercules missing, protect Golden Scarab and Adamantine Pollen
+    // Endgame: protect Hercules ingredients
     if (!(inv['hercules']||0)) {
       if ((key === 'golden_scarab' || key === 'pollen_adamantine') && (inv[key]||0) <= 1) {
         return true;
@@ -1200,7 +1207,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v8.9] booted');
+    console.log('[BeetleCoach v9.0] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
