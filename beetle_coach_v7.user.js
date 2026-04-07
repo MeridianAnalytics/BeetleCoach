@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.4.0
+// @version      8.5.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '8.4.0';
+  const CURRENT_VER = '8.5.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -696,6 +696,11 @@
       var hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
         'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'}[recipe.label];
       if (hk) { var ot = HAMMER_TIERS.indexOf(hk); if (ot<=ht||ot>ht+1) { continue; } }
+      // Skip already-owned outputs (same filter as getDirectCrafts)
+      var outputKey2 = RECIPE_OUTPUT[recipe.label];
+      if (outputKey2 && COLLECTIBLES.has(outputKey2) && (inv[outputKey2]||0) > 0) {
+        if (!NEEDED_AS_INGREDIENT.has(outputKey2)) { continue; }
+      }
       if (canMake(recipe, inv)) { continue; }
       var needed = {};
       for (var ni = 0; ni < recipe.inputs.length; ni++) { needed[recipe.inputs[ni]] = (needed[recipe.inputs[ni]]||0) + 1; }
@@ -736,7 +741,7 @@
       if (!seen[base]) { seen[base] = true; unique.push(plans[ui]); }
     }
 
-    // Cross-plan consumption check
+    // Cross-plan consumption check (credits recipe outputs for multi-step plans)
     var finalPlans = [];
     var sharedInv = Object.assign({}, inv);
     for (var fi = 0; fi < unique.length; fi++) {
@@ -747,9 +752,25 @@
         var sr = RECIPES.find(function(x) { return x.label === plan.steps[si].label; });
         if (!sr || !canMake(sr, testInv)) { ok = false; break; }
         testInv = consumeInputs(testInv, sr);
+        // Credit the output of prereq steps so subsequent steps can use them
+        if (si < plan.steps.length - 1) {
+          // For bridge/pollen recipes, credit the missing token that this step produces
+          // The prereq step was chosen specifically to produce what the next step needs
+          var nextStep = plan.steps[si + 1];
+          var nextRecipe = RECIPES.find(function(x) { return x.label === nextStep.label; });
+          if (nextRecipe) {
+            for (var ni = 0; ni < nextRecipe.inputs.length; ni++) {
+              var token = nextRecipe.inputs[ni];
+              if (!TOKEN_GROUPS[token] && (testInv[token]||0) < 1) {
+                testInv[token] = (testInv[token]||0) + 1; // Credit one output
+              }
+            }
+          }
+        }
       }
       if (ok) {
         finalPlans.push(plan);
+        // Deduct from shared inventory
         for (var ci = 0; ci < plan.steps.length; ci++) {
           var cr = RECIPES.find(function(x) { return x.label === plan.steps[ci].label; });
           if (cr) { sharedInv = consumeInputs(sharedInv, cr); }
@@ -1095,7 +1116,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v8.4] booted');
+    console.log('[BeetleCoach v8.5] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
