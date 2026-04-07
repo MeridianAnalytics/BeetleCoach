@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      10.7.0
+// @version      10.8.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '10.7.0';
+  const CURRENT_VER = '10.8.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -465,13 +465,13 @@
       var merge = function(items) { for (var k in items) { merged[k] = Math.max(merged[k]||0, items[k]); } };
       // Crafting module with fingerprint set pagination
       var seenFP = {};
-      merge(scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
+      merge(scanPage('.crafting-module__inventory-grid .crafting-module__beetle-item','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
       for (var i = 0; i < 20; i++) {
         var more = document.querySelector('.crafting-module__pagination-button');
         if (!more || more.disabled || more.classList.contains('disabled')) { break; }
         more.click();
         await new Promise(function(r) { setTimeout(r, 200); });
-        var page = scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count');
+        var page = scanPage('.crafting-module__inventory-grid .crafting-module__beetle-item','.crafting-module__beetle-img','.crafting-module__beetle-item-count');
         var fp = fingerprint(page);
         if (seenFP[fp]) { break; } // Already seen this page (loop detected)
         seenFP[fp] = true;
@@ -530,7 +530,7 @@
     if (!hasGame) { return; }
     var vis = {};
     var merge = function(items) { for (var k in items) { vis[k] = Math.max(vis[k]||0, items[k]); } };
-    merge(scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
+    merge(scanPage('.crafting-module__inventory-grid .crafting-module__beetle-item','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
     merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
     if (Object.keys(vis).length > 0) {
       var updated = false;
@@ -1573,7 +1573,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v10.7] booted');
+    console.log('[BeetleCoach v10.8] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
