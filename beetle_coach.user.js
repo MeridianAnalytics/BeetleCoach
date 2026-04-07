@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      10.0.0
+// @version      10.1.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '10.0.0';
+  const CURRENT_VER = '10.1.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -260,6 +260,7 @@
     return {ver:CURRENT_VER,mergedInventory:{},currentHammer:null,ownedHammers:[],brokenHammers:[],discoveredHammers:[],
       currentHammerBonus:null,currentHammerBreakChance:null,
       timers:{},lastFullScan:0,lastPassiveScan:0,autoClaim:true,autoHunt:false,panelOpen:true,level:null,craftMode:null,
+      strategy:'endgame', // 'endgame' = Mars Rhino path focus, 'broad' = collect everything
       log:[],
       session:{claims:0,hunts:0,cheeseClaims:0,cheeseGained:0,gains:[],startTime:Date.now()}};
   }
@@ -545,6 +546,13 @@
           }
         }
       }
+      // Prune stale pending items (older than 5 minutes)
+      if (S._pendingItems) {
+        var now = Date.now();
+        for (var pk in S._pendingItems) {
+          if (now - S._pendingItems[pk] > 300000) { delete S._pendingItems[pk]; }
+        }
+      }
       S.lastPassiveScan = Date.now();
       if (updated) { save(); }
     }
@@ -568,7 +576,7 @@
       var conf = scanConfidence();
       var cls = conf === 'fresh' ? 'bc8-fresh-ok' : (conf === 'warming' ? 'bc8-warming' : 'bc8-stale');
       fc.className = 'bc8-badge ' + cls;
-      fc.textContent = conf === 'stale' ? 'STALE' : (conf === 'warming' ? scanAge() + ' ~' : scanAge());
+      fc.textContent = conf === 'stale' ? 'STALE' : (conf === 'warming' ? scanAge() : scanAge());
     }
   }
 
@@ -630,8 +638,10 @@
     var st = S.currentHammer ? HAMMER_STATS[S.currentHammer] : null;
     S.currentHammerBonus = st ? st.bonus : null;
     S.currentHammerBreakChance = st ? st.baseBreak : null;
-    // Try to read live break% from the current hammer's hover tooltip
-    if (S.currentHammer && owned.length > 0) {
+    // Try to read live break% — only if crafting module visible and not probed recently
+    var shouldProbe = S.currentHammer && owned.length > 0 && (!S._lastHammerProbe || Date.now() - S._lastHammerProbe > 60000);
+    if (shouldProbe && document.querySelector('.crafting-module')) {
+      S._lastHammerProbe = Date.now();
       var currentIdx = HAMMER_TIERS.indexOf(S.currentHammer);
       var slots = document.querySelectorAll('.crafting-module__hammer-row .crafting-module__hammer-slot');
       if (slots[currentIdx] && !slots[currentIdx].classList.contains('crafting-module__hammer-slot--undiscovered')) {
@@ -836,25 +846,36 @@
   }
 
   /* ─── Goal-Directed Progression Engine ─── */
-  // The full collection path, ordered by dependency chain:
-  // Each goal: what beetle/flower is missing, what recipe makes it, what the prereqs are
-  var PROGRESSION_CHAIN = [
-    // Adamantine beetles (Stage 4)
-    {key:'goliath',recipe:'Goliath Beetle',inputs:['pinecone','pond'],prereqs:['pinecone'],via:'Mithril Bridge for Pinecone'},
-    {key:'stag',recipe:'Stag Beetle',inputs:['moss','pond'],prereqs:['moss'],via:'Mithril Bridge for Moss'},
-    {key:'bombardier',recipe:'Bombardier Beetle',inputs:['gunpowder','pond'],prereqs:['gunpowder'],via:'Mithril Bridge for Gunpowder'},
-    // Epic beetles (Stage 6) — need Adamantine flowers
-    {key:'sunset_moth',recipe:'Sunset Moth',inputs:['gazania','goliath'],prereqs:['gazania','goliath'],via:'Transmute Gazania (Green + Adamantine beetle + Junk Cube)'},
+  // Endgame chain: focused Mars Rhino path
+  var ENDGAME_CHAIN = [
+    {key:'goliath',recipe:'Goliath Beetle',prereqs:['pinecone'],via:'Mithril Bridge for Pinecone'},
+    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','goliath'],via:'Transmute Gazania (Green + Adamantine beetle + Junk Cube)'},
+    {key:'black_lotus',recipe:'Black Lotus',prereqs:['gunpowder','moss','pinecone'],via:'Need all 3 Mithril artifacts'},
+    {key:'mars_rhino',recipe:'Mars Rhino Beetle',prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'Need Black Lotus + Sunset Moth + Sabertooth'},
+    {key:'hercules',recipe:'Hercules Beetle',prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab is drop-only'}
+  ];
+  // Broad chain: collect everything, including intermediates and flowers
+  var BROAD_CHAIN = [
+    // Adamantine beetles first
+    {key:'goliath',recipe:'Goliath Beetle',prereqs:['pinecone'],via:'Mithril Bridge for Pinecone'},
+    {key:'stag',recipe:'Stag Beetle',prereqs:['moss'],via:'Mithril Bridge for Moss'},
+    {key:'bombardier',recipe:'Bombardier Beetle',prereqs:['gunpowder'],via:'Mithril Bridge for Gunpowder'},
+    // Flowers as explicit goals
+    {key:'gazania',recipe:'Bronze Flower Transmute',prereqs:[],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
+    {key:'pincushion',recipe:'Bronze Flower Transmute',prereqs:[],via:'Transmute: Green + Adamantine beetle + Junk Cube'},
+    // Epic beetles
+    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','goliath'],via:'Gazania + Adamantine beetle'},
     // Endgame
-    {key:'black_lotus',recipe:'Black Lotus',inputs:['gunpowder','moss','pinecone'],prereqs:['gunpowder','moss','pinecone'],via:'Need all 3 Mithril artifacts (3+ bridge runs)'},
-    {key:'mars_rhino',recipe:'Mars Rhino Beetle',inputs:['black_lotus','sunset_moth','sabertooth_longhorn'],prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'Need Black Lotus + Sunset Moth + Sabertooth'},
-    {key:'hercules',recipe:'Hercules Beetle',inputs:['golden_scarab','pollen_adamantine','purple'],prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab is drop-only. Need 2 Adamantine flowers for pollen.'}
+    {key:'black_lotus',recipe:'Black Lotus',prereqs:['gunpowder','moss','pinecone'],via:'Need all 3 Mithril artifacts'},
+    {key:'mars_rhino',recipe:'Mars Rhino Beetle',prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'Need all 3 endgame pieces'},
+    {key:'hercules',recipe:'Hercules Beetle',prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab is drop-only'}
   ];
 
   // Find the NEXT progression goal and what concrete step advances it
   function getProgressionMove(inv) {
-    for (var ci = 0; ci < PROGRESSION_CHAIN.length; ci++) {
-      var goal = PROGRESSION_CHAIN[ci];
+    var chain = (S.strategy === 'broad') ? BROAD_CHAIN : ENDGAME_CHAIN;
+    for (var ci = 0; ci < chain.length; ci++) {
+      var goal = chain[ci];
       if ((inv[goal.key]||0) > 0) { continue; } // Already have this
 
       // Check which prereqs are missing
@@ -1161,7 +1182,7 @@
     h += '<div class="bc8-header"><span class="bc8-title"><span id="bc8-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach</span>';
     var conf = scanConfidence();
     var freshCls = conf === 'fresh' ? 'bc8-fresh-ok' : (conf === 'warming' ? 'bc8-warming' : 'bc8-stale');
-    var freshTxt = conf === 'stale' ? 'STALE' : (conf === 'warming' ? scanAge() + ' ~' : scanAge());
+    var freshTxt = conf === 'stale' ? 'STALE' : (conf === 'warming' ? scanAge() : scanAge());
     h += '<span class="bc8-sub">' + (S.level ? 'Lv.' + S.level : '') + (cheeseStr ? ' \u00B7 ' + cheeseStr + ' \u{1F9C0}' : '') + ' \u00B7 <span id="bc8-fresh" class="bc8-badge ' + freshCls + '">' + freshTxt + '</span></span></div>';
 
     // Buttons
@@ -1171,6 +1192,7 @@
     h += '<button class="bc8-btn ' + (S.autoHunt ? 'on' : '') + '" id="bc8-ah">Hunt ' + (S.autoHunt ? 'ON' : 'OFF') + '</button>';
     h += '<button class="bc8-btn" id="bc8-mc">Miladychan</button>';
     h += '<button class="bc8-btn" id="bc8-wk">Wiki</button>';
+    h += '<button class="bc8-btn ' + (S.strategy==='endgame'?'on':'') + '" id="bc8-strat">' + (S.strategy==='endgame'?'Endgame':'Broad') + '</button>';
     h += '<button class="bc8-btn" id="bc8-exp">Export</button>';
     h += '<button class="bc8-btn" id="bc8-rst" style="color:#c0392b;border-color:#e6b0aa;">Reset</button>';
     h += '</div>';
@@ -1352,6 +1374,10 @@
     document.getElementById('bc8-ah').addEventListener('click', function() { S.autoHunt = !S.autoHunt; save(); renderPanel(); });
     document.getElementById('bc8-mc').addEventListener('click', function() { window.open('https://boards.miladychan.org/v/324142','_blank'); });
     document.getElementById('bc8-wk').addEventListener('click', function() { window.open('https://beetle.wiki/doku.php?id=start','_blank'); });
+    document.getElementById('bc8-strat').addEventListener('click', function() {
+      S.strategy = (S.strategy === 'endgame') ? 'broad' : 'endgame';
+      save(); renderPanel();
+    });
     document.getElementById('bc8-exp').addEventListener('click', function() { downloadExport(); });
     document.getElementById('bc8-rst').addEventListener('click', function() {
       if (confirm('Clear all data and rescan?')) { resetStore(); fullScan(); }
@@ -1419,7 +1445,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v10.0] booted');
+    console.log('[BeetleCoach v10.1] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
