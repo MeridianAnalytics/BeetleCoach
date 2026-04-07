@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      9.4.0
+// @version      9.5.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '9.4.0';
+  const CURRENT_VER = '9.5.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -312,7 +312,18 @@
       scanConfidence: scanConfidence(),
       lastFullScan: S.lastFullScan ? new Date(S.lastFullScan).toISOString() : null,
       lastPassiveScan: S.lastPassiveScan ? new Date(S.lastPassiveScan).toISOString() : null,
-      session: S.session
+      session: {
+        claims: (S.session||{}).claims || 0,
+        hunts: (S.session||{}).hunts || 0,
+        cheeseClaims: (S.session||{}).cheeseClaims || 0,
+        duration: Math.round((Date.now() - ((S.session||{}).startTime || Date.now())) / 60000) + 'm',
+        gains: (function() {
+          var raw = (S.session||{}).gains || (S.session||{}).beetles || [];
+          var counts = {};
+          for (var gi = 0; gi < raw.length; gi++) { counts[raw[gi]] = (counts[raw[gi]]||0) + 1; }
+          return counts;
+        })()
+      }
     };
     // Build readable inventory (non-junk, non-hammer)
     var keys = Object.keys(inv).filter(function(k) { return !JUNK_SET.has(k) && !SKIP_DISPLAY.has(k); })
@@ -703,10 +714,9 @@
     if (!(inv['sabertooth_longhorn']||0)) {
       if (key === 'pincushion' && (inv[key]||0) <= 1) { return true; }
     }
-    // Protect Mithril Pollen while artifact bridge is still needed
-    if (!(inv['goliath']||0) || !(inv['black_lotus']||0)) {
-      if (key === 'pollen_mithril' && (inv[key]||0) <= 1) { return true; }
-    }
+    // Note: Mithril Pollen is NOT protected here because consuming it
+    // in the Mithril Bridge is the primary way to advance the Goliath path.
+    // Protecting it creates a deadlock where the engine blocks its own progression.
     // Endgame: protect Mars Rhino ingredients
     if (!(inv['mars_rhino']||0)) {
       if ((key === 'black_lotus' || key === 'sunset_moth' || key === 'sabertooth_longhorn') && (inv[key]||0) <= 1) {
@@ -1374,7 +1384,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v9.4] booted');
+    console.log('[BeetleCoach v9.5] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
