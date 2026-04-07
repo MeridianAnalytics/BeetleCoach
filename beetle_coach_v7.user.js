@@ -732,12 +732,15 @@
   var _lastClaimTime = 0, _lastHuntTime = 0, _lastCheeseTime = 0;
   function tryAutoClaim() {
     if (!S.autoClaim || _scanning) { return; }
-    if (Date.now() - _lastClaimTime < 30000) { return; }
+    if (Date.now() - _lastClaimTime < 60000) { return; } // 60s debounce
     var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
-    if (btn) {
+    if (btn && !btn.disabled) {
+      // Double-check button text doesn't show timer
+      var btnText = btn.textContent || '';
+      if (/\d+[mhMs]\s/i.test(btnText)) { return; } // Has a countdown, not actually ready
       btn.click(); _lastClaimTime = Date.now();
-      logEvent('Auto-claimed beetle! Waiting 10s for reward...');
-      setTimeout(function() { logEvent('Post-claim scan'); fullScan(); }, 10000);
+      logEvent('Auto-claimed beetle! Waiting 15s for reward...');
+      setTimeout(function() { logEvent('Post-claim scan'); fullScan(); }, 15000);
     }
   }
   function tryAutoHunt() {
@@ -749,12 +752,15 @@
     if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) {
       return; // Would breach reserve
     }
-    if (Date.now() - _lastHuntTime < 30000) { return; }
+    if (Date.now() - _lastHuntTime < 90000) { return; } // 90s between hunts — game needs time to process
     var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
-    if (btn) {
+    if (btn && !btn.disabled) {
+      // Double-check the button text doesn't show cooldown
+      var btnText = btn.textContent || '';
+      if (/cooldown/i.test(btnText)) { return; }
       btn.click(); _lastHuntTime = Date.now();
-      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese). Reserve preserved.');
-      setTimeout(function() { logEvent('Post-hunt scan'); fullScan(); }, 10000);
+      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese). Waiting 15s for result...');
+      setTimeout(function() { logEvent('Post-hunt scan'); fullScan(); }, 15000);
     }
   }
   function tryClaimCheese() {
