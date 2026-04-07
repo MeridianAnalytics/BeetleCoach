@@ -1,5 +1,5 @@
 # BeetleBoy / BeetleCraft — Known Recipes, Facts & Coach Reference
-_Last updated: 2026-04-01 (enhanced with Beetle Coach v7.5 data)_
+_Last updated: 2026-04-06 (v8.2 + beetle.wiki cross-reference)_
 
 This is the clean human-readable recipe and mechanics text file for future AI chats and personal reference.
 
@@ -495,7 +495,83 @@ Features:
 
 ---
 
-## 21. What future AI should do with this file
+## 21. Corrections from beetle.wiki (April 2026)
+
+Source: https://beetle.wiki/doku.php?id=crafted_items
+
+### Pollens are ASSEMBLE, not smash
+All pollen recipes (Tin, Bronze, Mithril, Adamantine) are deterministic assemble recipes
+with 100% success rate. They are NOT probabilistic smash recipes.
+
+### Droppable high-tier beetles
+The following beetles can drop from catches (not only craftable):
+- Goliath Beetle (Adamantine rarity)
+- Stag Beetle (Adamantine rarity)
+- Golden Scarab (Diamond rarity) — this is the only way to get one
+
+### Holiday beetles (seasonal)
+- Skullbug (Halloween, Mithril)
+- Black Widow (Halloween, Diamond)
+- Christmas Beetle (Christmas, Mithril)
+- Candycane Tiger Moth (Christmas, Diamond)
+
+### Tier-up recipe (unreliable)
+- 2 Bronze beetles + 2 Bronze flowers -> Mithril beetle (smash, very low success)
+- Wiki explicitly says "Do NOT rely on this to work"
+
+### Transmutation is generic pattern
+- Same-rarity beetle + Junk Cube -> flower of that tier (one-way, smash)
+- Works for all tiers (Tin through Adamantine)
+
+---
+
+## 22. Anti-recipes (confirmed dead combos from beetle.wiki)
+
+Source: https://beetle.wiki/doku.php?id=antirecipes
+
+### Tin tier dead combos
+- Tin Pollen + Tin Pollen
+- Tin Pollen + Green Beetle
+- Tin Pollen + Junk Cube
+- Poppy + Junk Cube
+
+### Bronze tier
+- Purple Beetle + Moss
+
+### Mithril tier
+- Cattail + Cattail
+- Nectar + Nectar + Nectar
+- Nectar + Nectar + Cattail
+- Pond + Monarch + Moss
+- Pond + Monarch + Mithril Pollen
+- Imperial Tortoise + Giraffe Weevil + Pillbug
+- Camellia + Nectar + Cattail
+
+### Adamantine tier
+- Goliath + Gunpowder + Moss
+- Bombardier + Bombardier + Gunpowder
+- Bombardier + Bombardier + Moss
+- Stag + Adamantine Pollen
+- Adamantine Pollen + Cattail + Nectar
+- Adamantine Pollen + Mithril Pollen + Pond
+
+### Diamond tier
+- Golden Scarab + Junk Cube
+- Golden Scarab + Black Lotus
+- Golden Scarab + Mars Rhino
+- Golden Scarab + Mars Rhino + Black Lotus
+- Golden Scarab x3
+- Golden Scarab x2 + Mars Rhino
+- Golden Scarab + Mars Rhino x2
+- Mars Rhino x3
+
+### Key anti-recipe insight
+Golden Scarab does NOT combine with Black Lotus or Mars Rhino.
+The only known Hercules recipe is: Golden Scarab + Adamantine Pollen + Purple Beetle.
+
+---
+
+## 23. What future AI should do with this file
 
 If this file is pasted into a future AI conversation, the AI should:
 1. treat this as the current known baseline

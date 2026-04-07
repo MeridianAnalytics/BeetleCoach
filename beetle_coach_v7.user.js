@@ -127,10 +127,10 @@
     {label:'Mithril Hammer',type:'assemble',inputs:['hammer_t2','junk_cube_t2','pollen_bronze'],notes:'Deterministic.'},
     {label:'Adamantine Hammer',type:'assemble',inputs:['hammer_t3','junk_cube_t2','pollen_mithril'],notes:'Deterministic.'},
     {label:'Diamond Hammer',type:'assemble',inputs:['hammer_t4','junk_cube_t2','pollen_adamantine'],notes:'Deterministic.'},
-    {label:'Tin Pollen',type:'smash',inputs:['any_tin_flower','any_tin_flower'],notes:'Any 2 Tin flowers.'},
-    {label:'Bronze Pollen',type:'smash',inputs:['any_bronze_flower','any_bronze_flower'],notes:'Any 2 Bronze flowers.'},
-    {label:'Mithril Pollen',type:'smash',inputs:['any_mithril_flower','any_mithril_flower'],notes:'Any 2 Mithril flowers.'},
-    {label:'Adamantine Pollen',type:'smash',inputs:['any_adamantine_flower','any_adamantine_flower'],notes:'Any 2 Adamantine flowers.'},
+    {label:'Tin Pollen',type:'assemble',inputs:['any_tin_flower','any_tin_flower'],notes:'Any 2 Tin flowers.'},
+    {label:'Bronze Pollen',type:'assemble',inputs:['any_bronze_flower','any_bronze_flower'],notes:'Any 2 Bronze flowers.'},
+    {label:'Mithril Pollen',type:'assemble',inputs:['any_mithril_flower','any_mithril_flower'],notes:'Any 2 Mithril flowers.'},
+    {label:'Adamantine Pollen',type:'assemble',inputs:['any_adamantine_flower','any_adamantine_flower'],notes:'Any 2 Adamantine flowers.'},
     {label:'Nectar / Cattail Bridge',type:'smash',inputs:['any_bronze_beetle','pollen_bronze'],notes:'Bronze beetle + Bronze Pollen.'},
     {label:'Pinecone / Moss / Gunpowder Bridge',type:'smash',inputs:['any_mithril_beetle','pollen_mithril'],notes:'Mithril beetle + Mithril Pollen.'},
     {label:'Pond Beetle',type:'smash',inputs:['cattail','ladybug'],notes:'Cattail + Ladybug.'},
@@ -530,14 +530,37 @@
     return false;
   }
 
+  // Map recipe labels to their output item key (for "already owned" filtering)
+  var RECIPE_OUTPUT = {
+    'Pond Beetle':'pond','Monarch':'pond','Monarch (alt)':'monarch',
+    'Goliath Beetle':'goliath','Goliath Beetle (alt)':'goliath',
+    'Stag Beetle':'stag','Bombardier Beetle':'bombardier','Bombardier Beetle (alt)':'bombardier',
+    'Giraffe Weevil':'giraffe_weevil','Giraffe Weevil (alt)':'giraffe_weevil',
+    'Pillbug':'pillbug','Pillbug (alt)':'pillbug',
+    'Imperial Tortoise Beetle':'imperial_tortoise','Imperial Tortoise Beetle (alt)':'imperial_tortoise',
+    'Sabertooth Longhorn Beetle':'sabertooth_longhorn','Sabertooth Longhorn (Stag)':'sabertooth_longhorn','Sabertooth Longhorn (Bomb)':'sabertooth_longhorn',
+    'Sunset Moth':'sunset_moth','Sunset Moth (Stag)':'sunset_moth','Sunset Moth (Bomb)':'sunset_moth',
+    'Mars Rhino Beetle':'mars_rhino','Hercules Beetle':'hercules','Black Lotus':'black_lotus'
+  };
+  // Items that are consumed as ingredients in higher recipes (need duplicates)
+  var NEEDED_AS_INGREDIENT = new Set(['sabertooth_longhorn','sunset_moth','black_lotus']);
+
   function getDirectCrafts(inv) {
     var ht = S.ownedHammers.length ? Math.max.apply(null, S.ownedHammers.map(function(h) { return HAMMER_TIERS.indexOf(h); })) : -1;
     return RECIPES.filter(function(r) {
       if (r.label === 'Junk Cube') { return false; }
       if (!canMake(r, inv)) { return false; }
+      // Hammer filter
       var hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
         'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'}[r.label];
       if (hk) { var ot = HAMMER_TIERS.indexOf(hk); if (ot<=ht||ot>ht+1) { return false; } }
+      // Don't recommend crafting a beetle/flower you already own
+      // UNLESS it's needed as an ingredient for a higher recipe
+      var outputKey = RECIPE_OUTPUT[r.label];
+      if (outputKey && COLLECTIBLES.has(outputKey) && (inv[outputKey]||0) > 0) {
+        if (!NEEDED_AS_INGREDIENT.has(outputKey)) { return false; }
+      }
+      // Collection protection
       if (wouldConsumeLastCollectible(r, inv)) { return false; }
       return true;
     }).sort(function(a,b) { return (RECIPE_VALUE[b.label]||5) - (RECIPE_VALUE[a.label]||5); });
