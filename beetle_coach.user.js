@@ -1074,7 +1074,7 @@
 
   function tryAutoClaim() {
     if (!S.autoClaim || _scanning) { return; }
-    if (Date.now() - _lastClaimTime < 60000) { return; }
+    if (Date.now() - _lastClaimTime < 30000) { return; } // 30s debounce
     var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
@@ -1091,16 +1091,16 @@
     var cheese = S.mergedInventory.cheese || 0;
     if (cheese < HUNT_COST) { return; }
     if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return; }
-    if (Date.now() - _lastHuntTime < 90000) { return; }
+    if (Date.now() - _lastHuntTime < 15000) { return; } // 15s between hunts — game processes fast
     var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled):not(.disconnected)');
     if (btn && !btn.disabled) {
       var btnText = btn.textContent || '';
       if (/cooldown/i.test(btnText)) { return; }
       btn.click(); _lastHuntTime = Date.now();
       S.session.hunts++;
-      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese). Refreshing in 12s...');
+      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese). Refreshing in 8s...');
       save();
-      postActionRefresh('Post-hunt', 12000);
+      postActionRefresh('Post-hunt', 8000);
     }
   }
   function tryClaimCheese() {
