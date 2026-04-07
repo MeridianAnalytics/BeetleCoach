@@ -485,6 +485,7 @@
             changes.push(dn(k) + ' +' + (merged[k] - old));
             // Track high-tier beetle catches in session
             if (ALL_BEETLES.indexOf(k) > -1 && k !== 'green') {
+              if (!S.session.gains) { S.session.gains = S.session.beetles || []; }
               for (var bi = 0; bi < (merged[k] - old); bi++) { S.session.gains.push(dn(k)); }
             }
           }
