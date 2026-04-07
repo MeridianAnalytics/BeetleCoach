@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      9.0.0
+// @version      9.1.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '9.0.0';
+  const CURRENT_VER = '9.1.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -140,7 +140,14 @@
       }
       return candidates[candidates.length - 1]; // Best available
     }
-    // Endgame: use best available
+    // Endgame (76+): prefer Adamantine over Diamond for most recipes
+    // Diamond has 9% break after first use — only worth it for 90+ value
+    for (var i3 = 0; i3 < candidates.length; i3++) {
+      if (HAMMER_TIERS.indexOf(candidates[i3]) >= 3) { // Adamantine+
+        // If Adamantine available and value < 90, use Adamantine (not Diamond)
+        if (candidates[i3] === 'hammer_t4' || value < 90) { return candidates[i3]; }
+      }
+    }
     return candidates[candidates.length - 1];
   }
   const TOKEN_GROUPS = {
@@ -250,7 +257,7 @@
       currentHammerBonus:null,currentHammerBreakChance:null,
       timers:{},lastFullScan:0,lastPassiveScan:0,autoClaim:true,autoHunt:false,panelOpen:true,level:null,craftMode:null,
       log:[],
-      session:{claims:0,hunts:0,cheeseClaims:0,cheeseGained:0,beetles:[],startTime:Date.now()}};
+      session:{claims:0,hunts:0,cheeseClaims:0,cheeseGained:0,gains:[],startTime:Date.now()}};
   }
   function load() {
     try {
@@ -459,11 +466,13 @@
             updated = true;
           }
         } else if (isValid(k) && !BLOCKLIST.test(k) && !PFP_HASH.test(k) && vis[k] === 1) {
-          // Allow adding genuinely new items (new drops) if:
-          // - valid key, not blocklisted, count is exactly 1 (conservative)
-          S.mergedInventory[k] = vis[k];
-          updated = true;
-          logEvent('New item detected: ' + dn(k));
+          // Allow adding genuinely new items (new drops) conservatively
+          // Only add if key is a known game item (in LABELS) to avoid DOM noise
+          if (LABELS[k]) {
+            S.mergedInventory[k] = vis[k];
+            updated = true;
+            logEvent('New item: ' + dn(k));
+          }
         }
       }
       S.lastPassiveScan = Date.now();
@@ -540,10 +549,13 @@
         }
       }
     });
+    // Deduplicate and sort
+    function dedupe(arr) { var s = {}; return arr.filter(function(v) { return s[v] ? false : (s[v]=true); }); }
+    owned = dedupe(owned);
     owned.sort(function(a,b) { return HAMMER_TIERS.indexOf(b) - HAMMER_TIERS.indexOf(a); });
     S.ownedHammers = owned;
-    S.brokenHammers = broken;
-    S.discoveredHammers = discovered;
+    S.brokenHammers = dedupe(broken);
+    S.discoveredHammers = dedupe(discovered);
     S.currentHammer = owned[0] || null; // Highest non-broken hammer
     var st = S.currentHammer ? HAMMER_STATS[S.currentHammer] : null;
     S.currentHammerBonus = st ? st.bonus : null;
@@ -781,7 +793,7 @@
           plans.push({
             goal: recipe.label, value: (RECIPE_VALUE[recipe.label]||5) - 5, type: '2-step',
             steps: [
-              { label: prereq.label, inputs: prereq.inputs.map(tokHuman).join(' + '), ready: true, note: prereq.type === 'smash' ? 'RNG' : null },
+              { label: prereq.label, inputs: prereq.inputs.map(tokHuman).join(' + '), ready: true, note: prereq.type === 'smash' ? 'RNG' : null, produces: missingToken },
               { label: recipe.label, inputs: recipe.inputs.map(tokHuman).join(' + '), ready: false }
             ]
           });
@@ -809,20 +821,9 @@
         var sr = RECIPES.find(function(x) { return x.label === plan.steps[si].label; });
         if (!sr || !canMake(sr, testInv)) { ok = false; break; }
         testInv = consumeInputs(testInv, sr);
-        // Credit the output of prereq steps so subsequent steps can use them
-        if (si < plan.steps.length - 1) {
-          // For bridge/pollen recipes, credit the missing token that this step produces
-          // The prereq step was chosen specifically to produce what the next step needs
-          var nextStep = plan.steps[si + 1];
-          var nextRecipe = RECIPES.find(function(x) { return x.label === nextStep.label; });
-          if (nextRecipe) {
-            for (var ni = 0; ni < nextRecipe.inputs.length; ni++) {
-              var token = nextRecipe.inputs[ni];
-              if (!TOKEN_GROUPS[token] && (testInv[token]||0) < 1) {
-                testInv[token] = (testInv[token]||0) + 1; // Credit one output
-              }
-            }
-          }
+        // Credit the exact output this prereq step was chosen to produce
+        if (plan.steps[si].produces) {
+          testInv[plan.steps[si].produces] = (testInv[plan.steps[si].produces]||0) + 1;
         }
       }
       if (ok) {
@@ -1079,10 +1080,10 @@
     var durStr = sessionMins < 60 ? sessionMins + 'm' : Math.floor(sessionMins/60) + 'h' + (sessionMins%60 ? ' ' + (sessionMins%60) + 'm' : '');
     h += '<div class="bc8-card">';
     h += '<div class="bc8-row"><div class="bc8-h" style="margin:0;">Session</div><div class="bc8-val">' + durStr + ' \u00B7 ' + (sess.claims||0) + ' claims \u00B7 ' + (sess.hunts||0) + ' hunts</div></div>';
-    if (sess.beetles && sess.beetles.length > 0) {
+    if (sess.gains && sess.gains.length > 0) {
       var gainCounts = {};
-      for (var gi = 0; gi < sess.beetles.length; gi++) {
-        gainCounts[sess.beetles[gi]] = (gainCounts[sess.beetles[gi]]||0) + 1;
+      for (var gi = 0; gi < sess.gains.length; gi++) {
+        gainCounts[sess.gains[gi]] = (gainCounts[sess.gains[gi]]||0) + 1;
       }
       var gainStr = Object.keys(gainCounts).map(function(name) {
         return gainCounts[name] > 1 ? name + ' x' + gainCounts[name] : name;
@@ -1207,7 +1208,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v9.0] booted');
+    console.log('[BeetleCoach v9.1] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
