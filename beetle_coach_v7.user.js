@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      9.2.0
+// @version      9.3.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '9.2.0';
+  const CURRENT_VER = '9.3.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -441,7 +441,7 @@
         var more = document.querySelector('.crafting-module__pagination-button');
         if (!more || more.disabled || more.classList.contains('disabled')) { break; }
         more.click();
-        await new Promise(function(r) { setTimeout(r, 400); });
+        await new Promise(function(r) { setTimeout(r, 200); });
         var page = scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count');
         var fp = fingerprint(page);
         if (fp === lastFP) { break; } // Page didn't change
@@ -455,7 +455,7 @@
         var more2 = document.querySelector('.beetle-catch-module__pagination-button');
         if (!more2 || more2.disabled || more2.classList.contains('disabled')) { break; }
         more2.click();
-        await new Promise(function(r) { setTimeout(r, 400); });
+        await new Promise(function(r) { setTimeout(r, 200); });
         var page2 = scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count');
         var fp2 = fingerprint(page2);
         if (fp2 === lastFP) { break; }
@@ -471,7 +471,7 @@
             changes.push(dn(k) + ' +' + (merged[k] - old));
             // Track high-tier beetle catches in session
             if (ALL_BEETLES.indexOf(k) > -1 && k !== 'green') {
-              for (var bi = 0; bi < (merged[k] - old); bi++) { S.session.beetles.push(dn(k)); }
+              for (var bi = 0; bi < (merged[k] - old); bi++) { S.session.gains.push(dn(k)); }
             }
           }
         }
@@ -972,10 +972,11 @@
   // After claim/hunt/cheese: wait for game to process, then re-parse state and full scan
   function postActionRefresh(reason, delay) {
     setTimeout(function() {
-      logEvent(reason + ' — rescanning...');
+      logEvent(reason + ' — refreshing...');
       parseTimers();
       parseHammer();
-      fullScan();
+      passiveScan(); // Light scan only — no pagination disruption
+      renderPanel();
     }, delay);
   }
 
@@ -1032,7 +1033,7 @@
     s.textContent = [
       '#',BTN_ID,'{position:fixed;left:20px;bottom:20px;z-index:999999;padding:10px 14px;background:#d7f4f7;color:#11383d;border:1px solid #9bd8e0;border-radius:12px;font-weight:700;cursor:pointer;font-size:14px;}',
       '#',BTN_ID,':hover{background:#c0edf2;}',
-      '#',PANEL_ID,'{position:fixed;left:20px;top:50px;z-index:999999;width:380px;min-width:300px;max-width:90vw;background:#fff;border:2px solid #b8e6ec;border-radius:16px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.18);font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;color:#163238;max-height:calc(100vh - 70px);display:flex;flex-direction:column;gap:6px;overflow:hidden;resize:horizontal;}',
+      '#',PANEL_ID,'{position:fixed;left:20px;top:50px;z-index:999999;width:380px;min-width:300px;max-width:90vw;background:#fff;border:2px solid #b8e6ec;border-radius:16px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.18);font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;color:#163238;max-height:calc(100vh - 70px);display:flex;flex-direction:column;gap:6px;overflow:hidden;resize:both;}',
       '#',PANEL_ID,'.hidden{display:none!important;}',
       '.bc8-header{display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;padding-bottom:4px;border-bottom:1px solid #e8f4f7;margin-bottom:2px;}',
       '.bc8-title{font-size:18px;font-weight:800;}',
@@ -1346,7 +1347,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v9.2] booted');
+    console.log('[BeetleCoach v9.3] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
