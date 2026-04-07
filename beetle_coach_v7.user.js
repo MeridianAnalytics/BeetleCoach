@@ -218,7 +218,8 @@
     return {ver:CURRENT_VER,mergedInventory:{},currentHammer:null,ownedHammers:[],
       currentHammerBonus:null,currentHammerBreakChance:null,
       timers:{},lastFullScan:0,lastPassiveScan:0,autoClaim:true,autoHunt:false,panelOpen:true,level:null,craftMode:null,
-      log:[]};
+      log:[],
+      session:{claims:0,hunts:0,cheeseClaims:0,cheeseGained:0,beetles:[],startTime:Date.now()}};
   }
   function load() {
     try {
@@ -383,7 +384,13 @@
         var changes = [];
         for (var k in merged) {
           var old = oldInv[k] || 0;
-          if (merged[k] > old && !JUNK_SET.has(k) && k !== 'cheese') { changes.push(dn(k) + ' +' + (merged[k] - old)); }
+          if (merged[k] > old && !JUNK_SET.has(k) && k !== 'cheese') {
+            changes.push(dn(k) + ' +' + (merged[k] - old));
+            // Track high-tier beetle catches in session
+            if (ALL_BEETLES.indexOf(k) > -1 && k !== 'green') {
+              for (var bi = 0; bi < (merged[k] - old); bi++) { S.session.beetles.push(dn(k)); }
+            }
+          }
         }
         var junkDiff = cnt(merged, ANY_JUNK) - cnt(oldInv, ANY_JUNK);
         if (junkDiff > 0) { changes.push('Junk +' + junkDiff); }
@@ -747,7 +754,9 @@
       var btnText = btn.textContent || '';
       if (/\d+[mhMs]\s/i.test(btnText)) { return; }
       btn.click(); _lastClaimTime = Date.now();
+      S.session.claims++;
       logEvent('Auto-claimed beetle! Refreshing in 12s...');
+      save();
       postActionRefresh('Post-claim', 12000);
     }
   }
@@ -762,7 +771,9 @@
       var btnText = btn.textContent || '';
       if (/cooldown/i.test(btnText)) { return; }
       btn.click(); _lastHuntTime = Date.now();
+      S.session.hunts++;
       logEvent('Auto-hunted (-' + HUNT_COST + ' cheese). Refreshing in 12s...');
+      save();
       postActionRefresh('Post-hunt', 12000);
     }
   }
@@ -774,7 +785,9 @@
     var btn = document.querySelector('.claim-button:not(.disabled)');
     if (btn) {
       btn.click(); _lastCheeseTime = Date.now();
+      S.session.cheeseClaims++;
       logEvent('Auto-claimed daily cheese! Refreshing in 8s...');
+      save();
       postActionRefresh('Post-cheese', 8000);
     }
   }
@@ -949,8 +962,58 @@
     }
     h += '</div>';
 
+    // Session Stats
+    var sess = S.session || {};
+    var sessionMins = Math.round((Date.now() - (sess.startTime || Date.now())) / 60000);
+    h += '<div class="bc8-card"><div class="bc8-h">Session</div>';
+    h += '<div class="bc8-row"><div>Duration</div><div class="bc8-val">' + (sessionMins < 60 ? sessionMins + 'm' : Math.floor(sessionMins/60) + 'h ' + (sessionMins%60) + 'm') + '</div></div>';
+    h += '<div class="bc8-row"><div>Claims / Hunts</div><div class="bc8-val">' + (sess.claims||0) + ' / ' + (sess.hunts||0) + '</div></div>';
+    h += '<div class="bc8-row"><div>Cheese claims</div><div class="bc8-val">' + (sess.cheeseClaims||0) + '</div></div>';
+    if (sess.beetles && sess.beetles.length > 0) {
+      h += '<div class="bc8-muted" style="margin-top:3px;">Caught: ' + sess.beetles.join(', ') + '</div>';
+    }
+    h += '</div>';
+
+    // Resource Planner — show what's needed for next missing collectible goals
+    var col2 = getCollection(inv);
+    var plannerGoals = [];
+    // Check each missing beetle and trace what's needed
+    var GOAL_RECIPES = {
+      'goliath': {name:'Goliath Beetle', needs:[{item:'pinecone',label:'Pinecone'},{item:'pond',label:'Pond Beetle'}], prereq:'Mithril Bridge (Mithril beetle + Mithril Pollen) for Pinecone'},
+      'sunset_moth': {name:'Sunset Moth', needs:[{item:'gazania',label:'Gazania'},{item:'goliath',label:'Adamantine beetle'}], prereq:'Transmute Gazania (Green + Adamantine beetle + Junk Cube)'},
+      'mars_rhino': {name:'Mars Rhino', needs:[{item:'black_lotus',label:'Black Lotus'},{item:'sunset_moth',label:'Sunset Moth'},{item:'sabertooth_longhorn',label:'Sabertooth'}], prereq:'Need all 3 Mithril artifacts for Black Lotus'},
+      'hercules': {name:'Hercules Beetle', needs:[{item:'golden_scarab',label:'Golden Scarab'},{item:'pollen_adamantine',label:'Adamantine Pollen'},{item:'purple',label:'Purple Beetle'}], prereq:'Golden Scarab is drop-only (Diamond rarity)'}
+    };
+    for (var gk in GOAL_RECIPES) {
+      if ((inv[gk]||0) > 0) { continue; } // Already have it
+      var goal = GOAL_RECIPES[gk];
+      var missing2 = [];
+      var have2 = [];
+      for (var ni = 0; ni < goal.needs.length; ni++) {
+        var need = goal.needs[ni];
+        if ((inv[need.item]||0) > 0) { have2.push(need.label); }
+        else { missing2.push(need.label); }
+      }
+      if (missing2.length > 0) {
+        plannerGoals.push({name: goal.name, have: have2, missing: missing2, prereq: goal.prereq});
+      }
+    }
+    if (plannerGoals.length > 0) {
+      h += '<div class="bc8-scroll" style="max-height:120px;"><div class="bc8-h">Resource Planner</div>';
+      for (var gi = 0; gi < Math.min(plannerGoals.length, 3); gi++) {
+        var g = plannerGoals[gi];
+        h += '<div style="margin-bottom:6px;">';
+        h += '<div style="font-weight:700;font-size:11px;">' + g.name + '</div>';
+        if (g.have.length > 0) { h += '<div class="bc8-muted">\u2705 Have: ' + g.have.join(', ') + '</div>'; }
+        h += '<div class="bc8-muted">\u274C Need: ' + g.missing.join(', ') + '</div>';
+        h += '<div class="bc8-muted" style="color:#5b8dd9;">\u2192 ' + g.prereq + '</div>';
+        h += '</div>';
+      }
+      h += '</div>';
+    }
+
     // Activity Log
-    h += '<div class="bc8-scroll" style="max-height:90px;flex:1;"><div class="bc8-h">Log</div>';
+    h += '<div class="bc8-scroll" style="max-height:80px;flex:1;"><div class="bc8-h">Log</div>';
     h += '<div id="bc8-log">' + S.log.slice().reverse().map(function(l) { return '<div class="bc8-log-line">' + l + '</div>'; }).join('') + '</div></div>';
 
     panel.innerHTML = h;
