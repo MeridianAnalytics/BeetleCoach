@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      9.5.0
+// @version      9.6.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '9.5.0';
+  const CURRENT_VER = '9.6.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -448,8 +448,8 @@
     try {
       var merged = {};
       var merge = function(items) { for (var k in items) { merged[k] = Math.max(merged[k]||0, items[k]); } };
-      // Crafting module with fingerprint-based pagination
-      var lastFP = '';
+      // Crafting module with fingerprint set pagination
+      var seenFP = {};
       merge(scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
       for (var i = 0; i < 20; i++) {
         var more = document.querySelector('.crafting-module__pagination-button');
@@ -458,12 +458,12 @@
         await new Promise(function(r) { setTimeout(r, 200); });
         var page = scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count');
         var fp = fingerprint(page);
-        if (fp === lastFP) { break; } // Page didn't change
-        lastFP = fp;
+        if (seenFP[fp]) { break; } // Already seen this page (loop detected)
+        seenFP[fp] = true;
         merge(page);
       }
-      // Catch module with fingerprint-based pagination
-      lastFP = '';
+      // Catch module with fingerprint set pagination
+      var seenFP2 = {};
       merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
       for (var j = 0; j < 20; j++) {
         var more2 = document.querySelector('.beetle-catch-module__pagination-button');
@@ -472,8 +472,8 @@
         await new Promise(function(r) { setTimeout(r, 200); });
         var page2 = scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count');
         var fp2 = fingerprint(page2);
-        if (fp2 === lastFP) { break; }
-        lastFP = fp2;
+        if (seenFP2[fp2]) { break; }
+        seenFP2[fp2] = true;
         merge(page2);
       }
       if (Object.keys(merged).length > 0) {
@@ -525,13 +525,18 @@
             S.mergedInventory[k] = vis[k];
             updated = true;
           }
-        } else if (isValid(k) && !BLOCKLIST.test(k) && !PFP_HASH.test(k) && vis[k] === 1) {
-          // Allow adding genuinely new items (new drops) conservatively
-          // Only add if key is a known game item (in LABELS) to avoid DOM noise
-          if (LABELS[k]) {
+        } else if (isValid(k) && !BLOCKLIST.test(k) && !PFP_HASH.test(k) && vis[k] === 1 && LABELS[k]) {
+          // New item: add to inventory but defer logging until confirmed by second sight
+          if (!S._pendingItems) { S._pendingItems = {}; }
+          if (S._pendingItems[k]) {
+            // Second sighting — confirmed, add and log
             S.mergedInventory[k] = vis[k];
             updated = true;
-            logEvent('New item: ' + dn(k));
+            logEvent('New item confirmed: ' + dn(k));
+            delete S._pendingItems[k];
+          } else {
+            // First sighting — mark pending, don't add yet
+            S._pendingItems[k] = Date.now();
           }
         }
       }
@@ -1001,16 +1006,18 @@
   /* ─── FIX 4: Auto-Claim / Hunt / Cheese with explicit logging ─── */
   var _lastClaimTime = 0, _lastHuntTime = 0, _lastCheeseTime = 0;
   // After claim/hunt/cheese: wait for game to process, then re-parse state and full scan
+  var _pendingFullScan = null;
   function postActionRefresh(reason, delay) {
-    // Immediate light refresh, then delayed full scan for authoritative truth
     setTimeout(function() {
       logEvent(reason + ' — refreshing...');
       parseTimers();
       parseHammer();
       passiveScan();
       renderPanel();
-      // Queue a full scan 30s later to catch any items the passive scan missed
-      setTimeout(function() {
+      // Coalesce: clear any pending full scan, schedule one new one
+      if (_pendingFullScan) { clearTimeout(_pendingFullScan); }
+      _pendingFullScan = setTimeout(function() {
+        _pendingFullScan = null;
         if (!_scanning) { fullScan(); }
       }, 30000);
     }, delay);
@@ -1384,7 +1391,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v9.5] booted');
+    console.log('[BeetleCoach v9.6] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
