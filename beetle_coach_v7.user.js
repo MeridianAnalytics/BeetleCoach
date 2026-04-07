@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      8.3.0
+// @version      8.4.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '8.3.0';
+  const CURRENT_VER = '8.4.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -419,15 +419,20 @@
     merge(scanPage('.crafting-module__beetle-item:not(.crafting-module__hammer-slot)','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
     merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
     if (Object.keys(vis).length > 0) {
-      // Only update counts for items already known from full scan
-      // Never add new items from passive scan (prevents phantom ratcheting)
       var updated = false;
       for (var k in vis) {
         if (S.mergedInventory.hasOwnProperty(k)) {
+          // Update existing items
           if (vis[k] !== S.mergedInventory[k]) {
-            S.mergedInventory[k] = vis[k]; // Update to current visible count
+            S.mergedInventory[k] = vis[k];
             updated = true;
           }
+        } else if (isValid(k) && !BLOCKLIST.test(k) && !PFP_HASH.test(k) && vis[k] === 1) {
+          // Allow adding genuinely new items (new drops) if:
+          // - valid key, not blocklisted, count is exactly 1 (conservative)
+          S.mergedInventory[k] = vis[k];
+          updated = true;
+          logEvent('New item detected: ' + dn(k));
         }
       }
       S.lastPassiveScan = Date.now();
@@ -524,10 +529,12 @@
   }
   function isStale() { return scanConfidence() === 'stale'; }
   function scanAge() {
-    if (!S.lastFullScan) { return 'never'; }
-    var s = Math.round((Date.now() - S.lastFullScan) / 1000);
-    if (s < 60) { return s + 's'; }
-    return Math.round(s/60) + 'm';
+    var conf = scanConfidence();
+    var ts = (conf === 'warming') ? S.lastPassiveScan : S.lastFullScan;
+    if (!ts) { return 'never'; }
+    var s = Math.round((Date.now() - ts) / 1000);
+    var age = s < 60 ? s + 's' : Math.round(s/60) + 'm';
+    return conf === 'warming' ? age + ' passive' : age;
   }
 
   /* ─── Recommendation Engine ─── */
@@ -550,13 +557,15 @@
       } else if (COLLECTIBLES.has(token) && (inv[token]||0) <= 1) {
         return true;
       }
+      // Also protect endgame ingredients
+      if (!group && isProtectedForGoal(token, inv)) { return true; }
     }
     return false;
   }
 
   // Map recipe labels to their output item key (for "already owned" filtering)
   var RECIPE_OUTPUT = {
-    'Pond Beetle':'pond','Monarch':'pond','Monarch (alt)':'monarch',
+    'Pond Beetle':'pond','Monarch':'monarch','Monarch (alt)':'monarch',
     'Goliath Beetle':'goliath','Goliath Beetle (alt)':'goliath',
     'Stag Beetle':'stag','Bombardier Beetle':'bombardier','Bombardier Beetle (alt)':'bombardier',
     'Giraffe Weevil':'giraffe_weevil','Giraffe Weevil (alt)':'giraffe_weevil',
@@ -568,6 +577,22 @@
   };
   // Items that are consumed as ingredients in higher recipes (need duplicates)
   var NEEDED_AS_INGREDIENT = new Set(['sabertooth_longhorn','sunset_moth','black_lotus']);
+  // Protect one copy of endgame ingredients if higher goals are still missing
+  function isProtectedForGoal(key, inv) {
+    // If Mars Rhino missing, protect one each of its ingredients
+    if (!(inv['mars_rhino']||0)) {
+      if ((key === 'black_lotus' || key === 'sunset_moth' || key === 'sabertooth_longhorn') && (inv[key]||0) <= 1) {
+        return true;
+      }
+    }
+    // If Hercules missing, protect Golden Scarab and Adamantine Pollen
+    if (!(inv['hercules']||0)) {
+      if ((key === 'golden_scarab' || key === 'pollen_adamantine') && (inv[key]||0) <= 1) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   function getDirectCrafts(inv) {
     var ht = S.ownedHammers.length ? Math.max.apply(null, S.ownedHammers.map(function(h) { return HAMMER_TIERS.indexOf(h); })) : -1;
@@ -737,12 +762,13 @@
 
   /* ─── FIX 4: Auto-Claim / Hunt / Cheese with explicit logging ─── */
   var _lastClaimTime = 0, _lastHuntTime = 0, _lastCheeseTime = 0;
-  // After claim/hunt/cheese: wait for game to process, then refresh page for clean state
+  // After claim/hunt/cheese: wait for game to process, then re-parse state and full scan
   function postActionRefresh(reason, delay) {
     setTimeout(function() {
-      logEvent(reason + ' — refreshing page...');
-      save(); // Persist state before refresh
-      window.location.reload();
+      logEvent(reason + ' — rescanning...');
+      parseTimers();
+      parseHammer();
+      fullScan();
     }, delay);
   }
 
@@ -940,7 +966,8 @@
     } else {
       for (var dci = 0; dci < directCrafts.length; dci++) {
         var dc2 = directCrafts[dci];
-        h += '<div class="bc8-recipe"><div class="bc8-recipe-name">' + dc2.label + '</div><div class="bc8-muted">' + dc2.inputs.map(tokHuman).join(' + ') + '</div></div>';
+        var craftBadge = dc2.type === 'assemble' ? '<span class="bc8-badge bc8-fresh-ok" style="margin-left:4px;">SAFE</span>' : '<span class="bc8-badge bc8-countdown" style="margin-left:4px;">RNG</span>';
+        h += '<div class="bc8-recipe"><div class="bc8-recipe-name">' + dc2.label + craftBadge + '</div><div class="bc8-muted">' + dc2.inputs.map(tokHuman).join(' + ') + '</div></div>';
       }
     }
     h += '</div>';
@@ -970,7 +997,7 @@
     h += '<div class="bc8-row"><div>Claims / Hunts</div><div class="bc8-val">' + (sess.claims||0) + ' / ' + (sess.hunts||0) + '</div></div>';
     h += '<div class="bc8-row"><div>Cheese claims</div><div class="bc8-val">' + (sess.cheeseClaims||0) + '</div></div>';
     if (sess.beetles && sess.beetles.length > 0) {
-      h += '<div class="bc8-muted" style="margin-top:3px;">Caught: ' + sess.beetles.join(', ') + '</div>';
+      h += '<div class="bc8-muted" style="margin-top:3px;">Gained: ' + sess.beetles.join(', ') + '</div>';
     }
     h += '</div>';
 
@@ -1068,7 +1095,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v8.3] booted');
+    console.log('[BeetleCoach v8.4] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
