@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      9.6.0
+// @version      10.0.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -12,7 +12,7 @@
   'use strict';
 
   /* ─── Config ─── */
-  const CURRENT_VER = '9.6.0';
+  const CURRENT_VER = '10.0.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -193,7 +193,10 @@
     {label:'Sunset Moth (Bomb)',type:'smash',inputs:['gazania','bombardier'],notes:'Gazania + Bombardier.'},
     {label:'Black Lotus',type:'smash',inputs:['gunpowder','moss','pinecone'],notes:'All 3 Mithril artifacts.'},
     {label:'Mars Rhino Beetle',type:'smash',inputs:['black_lotus','sunset_moth','sabertooth_longhorn'],notes:'Black Lotus + Sunset + Sabertooth.'},
-    {label:'Hercules Beetle',type:'smash',inputs:['golden_scarab','pollen_adamantine','purple'],notes:'Golden Scarab + Adamantine Pollen + Purple.'}
+    {label:'Hercules Beetle',type:'smash',inputs:['golden_scarab','pollen_adamantine','purple'],notes:'Golden Scarab + Adamantine Pollen + Purple.'},
+    // Flower transmutation (Green + same-tier beetle + Junk Cube -> flower of that tier)
+    {label:'Bronze Flower Transmute',type:'smash',inputs:['green','purple','junk_cube_t1'],notes:'Green + Purple + Junk Cube -> Bronze flower (RNG).'},
+    {label:'Mithril Flower Transmute',type:'smash',inputs:['green','any_mithril_beetle','junk_cube_t1'],notes:'Green + Mithril beetle + Junk Cube -> Mithril flower (RNG). Costly!'}
   ];
   const RECIPE_VALUE = {
     'Hercules Beetle':100,'Mars Rhino Beetle':95,'Black Lotus':88,'Diamond Hammer':82,
@@ -205,7 +208,8 @@
     'Imperial Tortoise Beetle':55,'Imperial Tortoise Beetle (alt)':55,
     'Pinecone / Moss / Gunpowder Bridge':50,'Nectar / Cattail Bridge':40,'Mithril Pollen':40,
     'Mithril Hammer':30,'Pond Beetle':25,'Monarch':25,'Monarch (alt)':25,
-    'Bronze Hammer':15,'Bronze Pollen':12,'Junk Tesseract':8,'Tin Hammer':6,'Tin Pollen':5,'Junk Cube':1
+    'Bronze Hammer':15,'Bronze Pollen':12,'Bronze Flower Transmute':10,'Mithril Flower Transmute':35,
+    'Junk Tesseract':8,'Tin Hammer':6,'Tin Pollen':5,'Junk Cube':1
   };
 
   /* ─── Progression ─── */
@@ -622,10 +626,33 @@
     S.ownedHammers = owned;
     S.brokenHammers = dedupe(broken);
     S.discoveredHammers = dedupe(discovered);
-    S.currentHammer = owned[0] || null; // Highest non-broken hammer
+    S.currentHammer = owned[0] || null;
     var st = S.currentHammer ? HAMMER_STATS[S.currentHammer] : null;
     S.currentHammerBonus = st ? st.bonus : null;
     S.currentHammerBreakChance = st ? st.baseBreak : null;
+    // Try to read live break% from the current hammer's hover tooltip
+    if (S.currentHammer && owned.length > 0) {
+      var currentIdx = HAMMER_TIERS.indexOf(S.currentHammer);
+      var slots = document.querySelectorAll('.crafting-module__hammer-row .crafting-module__hammer-slot');
+      if (slots[currentIdx] && !slots[currentIdx].classList.contains('crafting-module__hammer-slot--undiscovered')) {
+        var slot = slots[currentIdx];
+        slot.dispatchEvent(new MouseEvent('mouseenter', {bubbles:true}));
+        slot.dispatchEvent(new MouseEvent('mouseover', {bubbles:true}));
+        setTimeout(function() {
+          var body = document.body.innerText;
+          var curM = body.match(/CURRENT BREAK CHANCE:\s*(\d+)%/i);
+          if (curM) {
+            S.currentHammerBreakChance = parseInt(curM[1]);
+            S.hammerBreakIsLive = true;
+            save();
+            // Update UI in-place
+            var el = document.getElementById('bc8-hammer-break');
+            if (el) { el.textContent = S.currentHammerBreakChance + '% break'; }
+          }
+          slot.dispatchEvent(new MouseEvent('mouseleave', {bubbles:true}));
+        }, 400);
+      }
+    }
   }
   function parseLevel() {
     var el = document.querySelector('.beetle-card__level');
@@ -1152,7 +1179,7 @@
     h += '<div class="bc8-strip">';
     h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Hammer:</span> ' + (S.currentHammer ? dn(S.currentHammer) : '\u2014') + '</div>';
     if (S.currentHammerBonus != null) {
-      h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Base:</span> +' + S.currentHammerBonus + '% / ' + S.currentHammerBreakChance + '% break</div>';
+      h += '<div class="bc8-strip-item"><span class="bc8-strip-label">+' + S.currentHammerBonus + '%</span> / <span id="bc8-hammer-break"' + (S.hammerBreakIsLive && S.currentHammerBreakChance > (HAMMER_STATS[S.currentHammer]||{}).baseBreak ? ' style="color:#e74c3c;font-weight:800;"' : '') + '>' + S.currentHammerBreakChance + '% break</span></div>';
     }
     if (S.brokenHammers && S.brokenHammers.length > 0) {
       h += '<div class="bc8-strip-item"><span style="color:#e74c3c;font-weight:700;">Broken:</span> ' + S.brokenHammers.map(dn).join(', ') + '</div>';
@@ -1392,7 +1419,7 @@
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     _intervals.push(setInterval(function() { tryAutoClaim(); tryAutoHunt(); tryClaimCheese(); }, ACTION_INTERVAL));
-    console.log('[BeetleCoach v9.6] booted');
+    console.log('[BeetleCoach v10.0] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {

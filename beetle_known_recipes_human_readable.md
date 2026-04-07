@@ -487,7 +487,7 @@ Note: Christmas Beetle is a special seasonal beetle.
 
 ## 20. Beetle Coach Tampermonkey script (v8.7)
 
-The companion script is `beetle_coach_v7.user.js` in this directory.
+The companion script is `beetle_coach.user.js` in this directory.
 GitHub: https://github.com/MeridianAnalytics/BeetleCoach
 
 ### Core automation
