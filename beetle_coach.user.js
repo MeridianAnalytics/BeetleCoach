@@ -11,6 +11,18 @@
 (function () {
   'use strict';
 
+  // Suppress OIDC auth error alerts that freeze the page
+  // The site's oidc-spa library shows a blocking alert() on session restore failure.
+  // This prevents the alert from blocking JS execution and automation.
+  var _origAlert = window.alert;
+  window.alert = function(msg) {
+    if (msg && /oidc|security|auth|framable|sessionRestoration/i.test(msg)) {
+      console.warn('[BeetleCoach] Suppressed OIDC alert:', msg);
+      return; // Swallow it
+    }
+    _origAlert.call(window, msg); // Pass through non-OIDC alerts
+  };
+
   /* ─── Config ─── */
   const CURRENT_VER = '11.5.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
