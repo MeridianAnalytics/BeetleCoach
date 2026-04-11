@@ -6,6 +6,7 @@
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
