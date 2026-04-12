@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      11.6.0
+// @version      11.7.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -25,7 +25,7 @@
   };
 
   /* ─── Config ─── */
-  const CURRENT_VER = '11.6.0';
+  const CURRENT_VER = '11.7.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -287,7 +287,7 @@
   function defaults() {
     return {ver:CURRENT_VER,mergedInventory:{},currentHammer:null,ownedHammers:[],brokenHammers:[],discoveredHammers:[],
       currentHammerBonus:null,currentHammerBreakChance:null,
-      timers:{},lastFullScan:0,lastPassiveScan:0,autoClaim:true,autoHunt:false,panelOpen:true,level:null,craftMode:null,
+      timers:{},lastFullScan:0,lastPassiveScan:0,autoClaim:true,autoHunt:true,panelOpen:true,level:null,craftMode:null,
       strategy:'endgame', // 'endgame' | 'broad' | 'flowers'
       log:[],
       stuckSince:0,stuckRefreshCount:0,
@@ -1478,27 +1478,109 @@
     return true;
   }
 
-  var _lastSignInAttempt = 0;
+  /* ─── Auto-Login: 3-screen OIDC auth flow ─── */
+  var _lastLoginAttempt = 0;
+  var _loginAttempts = 0;
+  var LOGIN_COOLDOWN = 15000;   // 15s between attempts per screen
+  var LOGIN_MAX_ATTEMPTS = 10;  // Give up after this many total attempts
+
+  function detectLoginScreen() {
+    var url = window.location.href;
+    var body = bodyText();
+
+    // Screen 3: OIDC login form with email/password fields and "Sign In" button
+    if (/\/oidc\/.*openid-connect/i.test(url)) {
+      var emailInput = document.querySelector('input[name="username"], input[type="email"], input[name="email"]');
+      var passInput = document.querySelector('input[name="password"], input[type="password"]');
+      var signInBtn = document.querySelector('input[type="submit"], button[type="submit"]');
+      if (!signInBtn) {
+        // Look for a button with "Sign In" text
+        var btns = document.querySelectorAll('button, input[type="button"], a');
+        for (var i = 0; i < btns.length; i++) {
+          if (/^\s*sign\s*in\s*$/i.test(btns[i].textContent.trim())) { signInBtn = btns[i]; break; }
+        }
+      }
+      if (emailInput && passInput && signInBtn) {
+        // Credentials pre-populated — just click Sign In
+        if (emailInput.value && passInput.value) { return {screen:3, action:signInBtn, desc:'Sign In (credentials pre-filled)'}; }
+        return {screen:3, action:null, desc:'Login form present but credentials not pre-filled'};
+      }
+      // Screen 2: Auth portal with "SIGN IN" / "NEW ACCOUNT" buttons (no form inputs)
+      if (/AUTHENTICATION\s*PORTAL/i.test(body) || /REMILIA.*SIGN\s*IN/i.test(body)) {
+        var portalBtns = document.querySelectorAll('button, a, div[role="button"]');
+        for (var j = 0; j < portalBtns.length; j++) {
+          var txt = portalBtns[j].textContent.trim();
+          if (/^\s*SIGN\s*IN\s*$/i.test(txt) && !/NEW/i.test(txt)) { return {screen:2, action:portalBtns[j], desc:'Auth Portal SIGN IN'}; }
+        }
+      }
+      return {screen:0, action:null, desc:'OIDC page but no actionable elements'};
+    }
+
+    // Screen 1: Main site showing "SIGN IN or register" (logged out)
+    if (/sign\s*in\s*(or\s*register)?/i.test(body) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) {
+      var signInEl = null;
+      document.querySelectorAll('*').forEach(function(el) {
+        if (!signInEl && /^\s*SIGN\s*IN\s*$/i.test(el.textContent.trim()) && el.children.length <= 1) { signInEl = el; }
+      });
+      if (!signInEl) {
+        // Try the top-right area specifically
+        var links = document.querySelectorAll('a, button, div[role="button"]');
+        for (var k = 0; k < links.length; k++) {
+          if (/SIGN\s*IN/i.test(links[k].textContent) && links[k].closest('.navbar-content, header, nav, [class*="nav"]')) {
+            signInEl = links[k]; break;
+          }
+        }
+      }
+      if (signInEl) { return {screen:1, action:signInEl, desc:'Main site SIGN IN'}; }
+    }
+
+    return {screen:0, action:null, desc:'Not a login screen'};
+  }
+
+  function tryAutoLogin() {
+    if (Date.now() - _lastLoginAttempt < LOGIN_COOLDOWN) { return false; }
+    if (_loginAttempts >= LOGIN_MAX_ATTEMPTS) {
+      logThrottled('login-maxed', 'Auto-login gave up after ' + LOGIN_MAX_ATTEMPTS + ' attempts. Manual login required.', 120000);
+      return false;
+    }
+
+    var screen = detectLoginScreen();
+    if (screen.screen === 0 || !screen.action) {
+      if (screen.screen === 3 && !screen.action) {
+        logThrottled('login-nocreds', 'Login form found but credentials not pre-filled. Manual login required.', 60000);
+      }
+      return false;
+    }
+
+    _lastLoginAttempt = Date.now();
+    _loginAttempts++;
+    logEvent('Auto-login screen ' + screen.screen + '/3: ' + screen.desc);
+    save();
+    clickElement(screen.action);
+    return true;
+  }
+
+  // Reset login attempt counter when we successfully reach the game
+  function resetLoginState() {
+    if (_loginAttempts > 0) {
+      logEvent('Login successful — resuming automation.');
+      _loginAttempts = 0;
+    }
+  }
+
   function runPriorityActions() {
     var readiness = automationReadiness();
     if (!readiness.ok) {
-      // Auto-click SIGN IN if logged out and creds are pre-populated
-      if (readiness.reason === 'sign-in required' && Date.now() - _lastSignInAttempt > 30000) {
-        var signInEl = null;
-        document.querySelectorAll('*').forEach(function(el) {
-          if (!signInEl && el.textContent.trim() === 'SIGN IN' && el.children.length <= 1) { signInEl = el; }
-        });
-        if (signInEl) {
-          _lastSignInAttempt = Date.now();
-          logEvent('Auto-clicking SIGN IN...');
-          signInEl.click();
-          return true;
-        }
+      // Try auto-login flow for any auth-related block
+      if (readiness.reason === 'sign-in required' || readiness.reason === 'auth restoration in progress') {
+        if (tryAutoLogin()) { return true; }
       }
       if (readiness.cooloff) { holdNavigation(readiness.reason); }
       else { logThrottled('automation-pause:' + readiness.reason, 'Automation paused: ' + readiness.reason + '.', LOG_THROTTLE_MS); }
       return true;
     }
+    // If we got here, we're authenticated — reset login state
+    resetLoginState();
     if (checkStuckState()) { return true; }
     if (tryAutoClaim()) { return true; }
     if (tryAutoHunt()) { return true; }
@@ -2063,7 +2145,12 @@
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     // Only fire ONE action per cycle, and always prioritize claim/hunt over scans
     _intervals.push(setInterval(runPriorityActions, ACTION_INTERVAL));
-    console.log('[BeetleCoach v11.6] booted');
+    // On OIDC pages, try auto-login immediately and periodically
+    if (/\/oidc\/.*openid-connect/i.test(window.location.href)) {
+      setTimeout(function() { tryAutoLogin(); }, 2000);
+      _intervals.push(setInterval(function() { tryAutoLogin(); }, LOGIN_COOLDOWN + 1000));
+    }
+    console.log('[BeetleCoach v11.7] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
