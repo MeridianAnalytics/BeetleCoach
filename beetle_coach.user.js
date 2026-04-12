@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      11.7.0
-// @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
+// @version      12.0.0
+// @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -13,36 +13,38 @@
   'use strict';
 
   // Suppress OIDC auth error alerts that freeze the page
-  // The site's oidc-spa library shows a blocking alert() on session restore failure.
-  // This prevents the alert from blocking JS execution and automation.
   var _origAlert = window.alert;
   window.alert = function(msg) {
     if (msg && /oidc|security|auth|framable|sessionRestoration/i.test(msg)) {
-      console.warn('[BeetleCoach] Suppressed OIDC alert:', msg);
-      return; // Swallow it
+      console.warn('[BC] Suppressed OIDC alert:', msg);
+      return;
     }
-    _origAlert.call(window, msg); // Pass through non-OIDC alerts
+    _origAlert.call(window, msg);
   };
 
-  /* ─── Config ─── */
-  const CURRENT_VER = '11.7.0';
-  const OLD_STORE_KEY = 'beetle_coach_v7_store';
-  const STORE_KEY = 'beetle_coach_v8_store';
-  const PANEL_ID = 'bc8-panel';
-  const BTN_ID = 'bc8-toggle';
-  const STYLE_ID = 'bc8-style';
-  const STALE_THRESHOLD = 120000; // 2 min
-  const HUNT_COST = 20;
-  const MIN_CHEESE_RESERVE = 100;
-  const PASSIVE_SCAN_INTERVAL = 30000; // 30s
-  const TIMER_INTERVAL = 5000;
-  const ACTION_INTERVAL = 10000;
-  const BOOT_NAV_DELAY = 8000;
-  const NAV_RETRY_COOLDOWN = 60000;
-  const LOG_THROTTLE_MS = 30000;
+  /* ═══════════════════════════════════════════════════════
+     1. CONFIG
+     ═══════════════════════════════════════════════════════ */
+  var VER = '12.0.0';
+  var STORE_KEY = 'beetle_coach_v8_store';
+  var PANEL_ID = 'bc8-panel';
+  var BTN_ID = 'bc8-toggle';
+  var STYLE_ID = 'bc8-style';
+  var STALE_MS = 120000;
+  var HUNT_COST = 20;
+  var MIN_CHEESE = 100;
+  var TICK_MS = 5000;
+  var ACTION_TIMEOUT = 30000;
+  var LOGIN_COOLDOWN = 15000;
+  var LOGIN_MAX = 10;
+  var NAV_COOLDOWN = 60000;
+  var BOOT_GRACE = 8000;
+  var LOG_THROTTLE = 30000;
 
-  /* ─── Labels ─── */
-  const LABELS = {
+  /* ═══════════════════════════════════════════════════════
+     2. DATA TABLES
+     ═══════════════════════════════════════════════════════ */
+  var LABELS = {
     green:'Green Beetle',ladybug:'Ladybug',purple:'Purple Beetle',pond:'Pond Beetle',
     monarch:'Monarch',goliath:'Goliath Beetle',stag:'Stag Beetle',bombardier:'Bombardier Beetle',
     giraffe_weevil:'Giraffe Weevil',pillbug:'Pillbug',imperial_tortoise:'Imperial Tortoise Beetle',
@@ -71,8 +73,7 @@
     rubber_band:'Rubber Band',gum_wrapper:'Gum Wrapper'
   };
 
-  /* ─── Tiers ─── */
-  const TIER_MAP = {
+  var TIER_MAP = {
     green:'Tin',ladybug:'Bronze',purple:'Bronze',pond:'Mithril',monarch:'Mithril',
     goliath:'Adamantine',stag:'Adamantine',bombardier:'Adamantine',
     giraffe_weevil:'Rare',pillbug:'Rare',imperial_tortoise:'Rare',
@@ -86,14 +87,13 @@
     pollen_tin:'Tin',pollen_bronze:'Bronze',pollen_mithril:'Mithril',pollen_adamantine:'Adamantine',
     nectar:'Bridge',cattail:'Bridge',pinecone:'Bridge',moss:'Bridge',gunpowder:'Bridge'
   };
-  const TIER_COLORS = {
+  var TIER_COLORS = {
     Tin:'#7a8a7a',Bronze:'#b87333',Mithril:'#5b8dd9',Adamantine:'#9b59b6',
     Rare:'#e67e22',Epic:'#e74c3c',Legendary:'#f1c40f',Bridge:'#1abc9c',
     Uncommon:'#6a9955',Special:'#e84393'
   };
 
-  /* ─── Aliases ─── */
-  const ITEM_ALIASES = {
+  var ITEM_ALIASES = {
     pollen_common:'pollen_tin',pollen_uncommon:'pollen_bronze',pollen_rare:'pollen_mithril',
     tin_hammer:'hammer_t1',bronze_hammer:'hammer_t2',mithril_hammer:'hammer_t3',
     adamantine_hammer:'hammer_t4',diamond_hammer:'hammer_t5',
@@ -106,123 +106,88 @@
     morningglory:'morning_glory',milkthistle:'milk_thistle',blacklotus:'black_lotus'
   };
 
-  /* ─── Item Groups ─── */
-  const TIN_FLOWERS = ['daisy','poppy','sunflower'];
-  const BRONZE_FLOWERS = ['marigold','gallic_rose','milk_thistle'];
-  const MITHRIL_FLOWERS = ['royal_poinciana','camellia','morning_glory'];
-  const ADAMANTINE_FLOWERS = ['pincushion','gazania'];
-  const BRONZE_BEETLES = ['ladybug','purple'];
-  const MITHRIL_BEETLES = ['pond','monarch'];
-  const ADAMANTINE_BEETLES = ['goliath','stag','bombardier'];
-  const ANY_JUNK = [
+  var TIN_FLOWERS = ['daisy','poppy','sunflower'];
+  var BRONZE_FLOWERS = ['marigold','gallic_rose','milk_thistle'];
+  var MITHRIL_FLOWERS = ['royal_poinciana','camellia','morning_glory'];
+  var ADAMANTINE_FLOWERS = ['pincushion','gazania'];
+  var BRONZE_BEETLES = ['ladybug','purple'];
+  var MITHRIL_BEETLES = ['pond','monarch'];
+  var ADAMANTINE_BEETLES = ['goliath','stag','bombardier'];
+  var ANY_JUNK = [
     'coffee_can','red_whistle','cracker_wrapper','stamp','marble','bottle_cap',
     'ramune_bottle','wine_cork','green_army_man','scratch_off','cigarette_butt',
     'train_ticket_stub','chip_bag','chocolate_wrapper','jack_adapter','paperclip',
     'pebble','soda_can_tab','chocolate_bar','empty_noodle_cup','juicebox',
     'smiley_pebble','watch_battery','bike_reflector','pokkiri_box','rubber_band','gum_wrapper'
   ];
-  const JUNK_SET = new Set(ANY_JUNK);
-  const SKIP_DISPLAY = new Set(['hammer_t1','hammer_t2','hammer_t3','hammer_t4','hammer_t5','beetleboy_key']);
-  const HAMMER_STATS = {
-    hammer_t1:{bonus:0,baseBreak:10},hammer_t2:{bonus:5,baseBreak:5},
-    hammer_t3:{bonus:20,baseBreak:10},hammer_t4:{bonus:35,baseBreak:2},
-    hammer_t5:{bonus:90,baseBreak:1}
-  };
-  const HAMMER_TIERS = ['hammer_t1','hammer_t2','hammer_t3','hammer_t4','hammer_t5'];
-  // Recommend appropriate hammer for a recipe based on its value
-  // Don't risk expensive hammers on cheap crafts
-  function recommendHammer(recipeLabel, ownedHammers, recipeType) {
-    var value = RECIPE_VALUE[recipeLabel] || 5;
-    var candidates = ownedHammers.slice().sort(function(a,b) {
-      return HAMMER_TIERS.indexOf(a) - HAMMER_TIERS.indexOf(b);
-    });
-    if (!candidates.length) { return null; }
-
-    // Assemble recipes are 100% success — always use cheapest hammer (no risk)
-    if (recipeType === 'assemble') { return candidates[0]; }
-
-    // Smash recipes: balance bonus vs break risk vs recipe value
-    // Score each hammer: higher = better choice for this recipe
-    var best = null;
-    var bestScore = -999;
-    for (var hi = 0; hi < candidates.length; hi++) {
-      var h = candidates[hi];
-      var stats = HAMMER_STATS[h];
-      if (!stats) { continue; }
-      var tier = HAMMER_TIERS.indexOf(h);
-      var breakPct = stats.baseBreak;
-      // Use live break% if available for current hammer
-      if (h === S.currentHammer && S.hammerBreakIsLive) { breakPct = S.currentHammerBreakChance || stats.baseBreak; }
-      var bonus = stats.bonus;
-      // Replacement cost (base units from value model)
-      var replaceCost = [4, 13, 33, 159, 1395][tier] || 0;
-
-      // EV calculation: bonus gain vs break risk
-      // Score = (bonus contribution to recipe value) - (break probability * replacement cost)
-      var bonusGain = value * (bonus / 100);
-      var breakLoss = (breakPct / 100) * replaceCost;
-      var score = bonusGain - breakLoss;
-
-      // Penalty: don't use Diamond unless value >= 90
-      if (h === 'hammer_t5' && value < 90) { score -= 50; }
-      // Bonus: Adamantine is the sweet spot for most high-value crafts
-      if (h === 'hammer_t4' && value >= 40) { score += 5; }
-
-      if (score > bestScore) { bestScore = score; best = h; }
-    }
-    return best || candidates[0];
-  }
-  const TOKEN_GROUPS = {
+  var JUNK_SET = new Set(ANY_JUNK);
+  var SKIP_DISPLAY = new Set(['hammer_t1','hammer_t2','hammer_t3','hammer_t4','hammer_t5','beetleboy_key']);
+  var TOKEN_GROUPS = {
     any_junk:ANY_JUNK, any_tin_flower:TIN_FLOWERS, any_bronze_flower:BRONZE_FLOWERS,
     any_mithril_flower:MITHRIL_FLOWERS, any_adamantine_flower:ADAMANTINE_FLOWERS,
     any_bronze_beetle:BRONZE_BEETLES, any_mithril_beetle:MITHRIL_BEETLES,
     any_adamantine_beetle:ADAMANTINE_BEETLES
   };
+  var HAMMER_TIERS = ['hammer_t1','hammer_t2','hammer_t3','hammer_t4','hammer_t5'];
+  var HAMMER_STATS = {
+    hammer_t1:{bonus:0,baseBreak:10},hammer_t2:{bonus:5,baseBreak:5},
+    hammer_t3:{bonus:20,baseBreak:10},hammer_t4:{bonus:35,baseBreak:2},
+    hammer_t5:{bonus:90,baseBreak:1}
+  };
+  var HAMMER_RECIPE_KEY = {
+    'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
+    'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'
+  };
 
-  /* ─── Recipes ─── */
-  const RECIPES = [
-    {label:'Junk Cube',type:'assemble',inputs:['any_junk','any_junk'],notes:'Any 2 junk items.'},
-    {label:'Junk Tesseract',type:'assemble',inputs:['junk_cube_t1','junk_cube_t1','junk_cube_t1'],notes:'3 Junk Cubes.'},
-    {label:'Tin Hammer',type:'assemble',inputs:['junk_cube_t1','junk_cube_t1'],notes:'2 Junk Cubes.'},
-    {label:'Bronze Hammer',type:'assemble',inputs:['hammer_t1','junk_cube_t2','pollen_tin'],notes:'Deterministic.'},
-    {label:'Mithril Hammer',type:'assemble',inputs:['hammer_t2','junk_cube_t2','pollen_bronze'],notes:'Deterministic.'},
-    {label:'Adamantine Hammer',type:'assemble',inputs:['hammer_t3','junk_cube_t2','pollen_mithril'],notes:'Deterministic.'},
-    {label:'Diamond Hammer',type:'assemble',inputs:['hammer_t4','junk_cube_t2','pollen_adamantine'],notes:'Deterministic.'},
-    {label:'Tin Pollen',type:'assemble',inputs:['any_tin_flower','any_tin_flower'],notes:'Any 2 Tin flowers.'},
-    {label:'Bronze Pollen',type:'assemble',inputs:['any_bronze_flower','any_bronze_flower'],notes:'Any 2 Bronze flowers.'},
-    {label:'Mithril Pollen',type:'assemble',inputs:['any_mithril_flower','any_mithril_flower'],notes:'Any 2 Mithril flowers.'},
-    {label:'Adamantine Pollen',type:'assemble',inputs:['any_adamantine_flower','any_adamantine_flower'],notes:'Any 2 Adamantine flowers.'},
-    {label:'Nectar / Cattail Bridge',type:'smash',inputs:['any_bronze_beetle','pollen_bronze'],notes:'Bronze beetle + Bronze Pollen.'},
-    {label:'Pinecone / Moss / Gunpowder Bridge',type:'smash',inputs:['any_mithril_beetle','pollen_mithril'],notes:'Mithril beetle + Mithril Pollen.'},
-    {label:'Pond Beetle',type:'smash',inputs:['cattail','ladybug'],notes:'Cattail + Ladybug.'},
-    {label:'Monarch',type:'smash',inputs:['nectar','ladybug'],notes:'Nectar + Ladybug.'},
-    {label:'Monarch (alt)',type:'smash',inputs:['nectar','purple'],notes:'Nectar + Purple Beetle.'},
-    {label:'Bombardier Beetle',type:'smash',inputs:['gunpowder','pond'],notes:'Gunpowder + Pond Beetle.'},
-    {label:'Bombardier Beetle (alt)',type:'smash',inputs:['gunpowder','monarch'],notes:'Gunpowder + Monarch.'},
-    {label:'Stag Beetle',type:'smash',inputs:['moss','pond'],notes:'Moss + Pond Beetle.'},
-    {label:'Goliath Beetle',type:'smash',inputs:['pinecone','pond'],notes:'Pinecone + Pond Beetle.'},
-    {label:'Goliath Beetle (alt)',type:'smash',inputs:['pinecone','monarch'],notes:'Pinecone + Monarch.'},
-    {label:'Giraffe Weevil',type:'smash',inputs:['royal_poinciana','pond'],notes:'Royal Poinciana + Pond.'},
-    {label:'Giraffe Weevil (alt)',type:'smash',inputs:['royal_poinciana','monarch'],notes:'Royal Poinciana + Monarch.'},
-    {label:'Pillbug',type:'smash',inputs:['camellia','pond'],notes:'Camellia + Pond.'},
-    {label:'Pillbug (alt)',type:'smash',inputs:['camellia','monarch'],notes:'Camellia + Monarch.'},
-    {label:'Imperial Tortoise Beetle',type:'smash',inputs:['morning_glory','pond'],notes:'Morning Glory + Pond.'},
-    {label:'Imperial Tortoise Beetle (alt)',type:'smash',inputs:['morning_glory','monarch'],notes:'Morning Glory + Monarch.'},
-    {label:'Sabertooth Longhorn Beetle',type:'smash',inputs:['pincushion','goliath'],notes:'Pincushion + Goliath.'},
-    {label:'Sabertooth Longhorn (Stag)',type:'smash',inputs:['pincushion','stag'],notes:'Pincushion + Stag.'},
-    {label:'Sabertooth Longhorn (Bomb)',type:'smash',inputs:['pincushion','bombardier'],notes:'Pincushion + Bombardier.'},
-    {label:'Sunset Moth',type:'smash',inputs:['gazania','goliath'],notes:'Gazania + Goliath.'},
-    {label:'Sunset Moth (Stag)',type:'smash',inputs:['gazania','stag'],notes:'Gazania + Stag.'},
-    {label:'Sunset Moth (Bomb)',type:'smash',inputs:['gazania','bombardier'],notes:'Gazania + Bombardier.'},
-    {label:'Black Lotus',type:'smash',inputs:['gunpowder','moss','pinecone'],notes:'All 3 Mithril artifacts.'},
-    {label:'Mars Rhino Beetle',type:'smash',inputs:['black_lotus','sunset_moth','sabertooth_longhorn'],notes:'Black Lotus + Sunset + Sabertooth.'},
-    {label:'Hercules Beetle',type:'smash',inputs:['golden_scarab','pollen_adamantine','purple'],notes:'Golden Scarab + Adamantine Pollen + Purple.'},
-    // Flower transmutation (Green + same-tier beetle + Junk Cube -> flower of that tier)
-    {label:'Bronze Flower Transmute',type:'smash',inputs:['green','purple','junk_cube_t1'],notes:'Green + Purple + Junk Cube -> Bronze flower (RNG).'},
-    {label:'Mithril Flower Transmute',type:'smash',inputs:['green','any_mithril_beetle','junk_cube_t1'],notes:'Green + Mithril beetle + Junk Cube -> Mithril flower (RNG). Costly!'},
-    {label:'Adamantine Flower Transmute',type:'smash',inputs:['green','any_adamantine_beetle','junk_cube_t1'],notes:'Green + Adamantine beetle + Junk Cube -> Adamantine flower (RNG).'}
+  var ALL_BEETLES = ['green','ladybug','purple','pond','monarch','goliath','stag','bombardier',
+    'giraffe_weevil','pillbug','imperial_tortoise','sabertooth_longhorn','sunset_moth',
+    'mars_rhino','golden_scarab','hercules','skull','christmas'];
+  var ALL_FLOWERS = ['daisy','poppy','sunflower','marigold','gallic_rose','milk_thistle',
+    'royal_poinciana','camellia','morning_glory','pincushion','gazania','black_lotus'];
+  var COLLECTIBLES = new Set([].concat(ALL_BEETLES, ALL_FLOWERS));
+
+  var RECIPES = [
+    {label:'Junk Cube',type:'assemble',inputs:['any_junk','any_junk']},
+    {label:'Junk Tesseract',type:'assemble',inputs:['junk_cube_t1','junk_cube_t1','junk_cube_t1']},
+    {label:'Tin Hammer',type:'assemble',inputs:['junk_cube_t1','junk_cube_t1']},
+    {label:'Bronze Hammer',type:'assemble',inputs:['hammer_t1','junk_cube_t2','pollen_tin']},
+    {label:'Mithril Hammer',type:'assemble',inputs:['hammer_t2','junk_cube_t2','pollen_bronze']},
+    {label:'Adamantine Hammer',type:'assemble',inputs:['hammer_t3','junk_cube_t2','pollen_mithril']},
+    {label:'Diamond Hammer',type:'assemble',inputs:['hammer_t4','junk_cube_t2','pollen_adamantine']},
+    {label:'Tin Pollen',type:'assemble',inputs:['any_tin_flower','any_tin_flower']},
+    {label:'Bronze Pollen',type:'assemble',inputs:['any_bronze_flower','any_bronze_flower']},
+    {label:'Mithril Pollen',type:'assemble',inputs:['any_mithril_flower','any_mithril_flower']},
+    {label:'Adamantine Pollen',type:'assemble',inputs:['any_adamantine_flower','any_adamantine_flower']},
+    {label:'Nectar / Cattail Bridge',type:'smash',inputs:['any_bronze_beetle','pollen_bronze']},
+    {label:'Pinecone / Moss / Gunpowder Bridge',type:'smash',inputs:['any_mithril_beetle','pollen_mithril']},
+    {label:'Pond Beetle',type:'smash',inputs:['cattail','ladybug']},
+    {label:'Monarch',type:'smash',inputs:['nectar','ladybug']},
+    {label:'Monarch (alt)',type:'smash',inputs:['nectar','purple']},
+    {label:'Bombardier Beetle',type:'smash',inputs:['gunpowder','pond']},
+    {label:'Bombardier Beetle (alt)',type:'smash',inputs:['gunpowder','monarch']},
+    {label:'Stag Beetle',type:'smash',inputs:['moss','pond']},
+    {label:'Goliath Beetle',type:'smash',inputs:['pinecone','pond']},
+    {label:'Goliath Beetle (alt)',type:'smash',inputs:['pinecone','monarch']},
+    {label:'Giraffe Weevil',type:'smash',inputs:['royal_poinciana','pond']},
+    {label:'Giraffe Weevil (alt)',type:'smash',inputs:['royal_poinciana','monarch']},
+    {label:'Pillbug',type:'smash',inputs:['camellia','pond']},
+    {label:'Pillbug (alt)',type:'smash',inputs:['camellia','monarch']},
+    {label:'Imperial Tortoise Beetle',type:'smash',inputs:['morning_glory','pond']},
+    {label:'Imperial Tortoise Beetle (alt)',type:'smash',inputs:['morning_glory','monarch']},
+    {label:'Sabertooth Longhorn Beetle',type:'smash',inputs:['pincushion','goliath']},
+    {label:'Sabertooth Longhorn (Stag)',type:'smash',inputs:['pincushion','stag']},
+    {label:'Sabertooth Longhorn (Bomb)',type:'smash',inputs:['pincushion','bombardier']},
+    {label:'Sunset Moth',type:'smash',inputs:['gazania','goliath']},
+    {label:'Sunset Moth (Stag)',type:'smash',inputs:['gazania','stag']},
+    {label:'Sunset Moth (Bomb)',type:'smash',inputs:['gazania','bombardier']},
+    {label:'Black Lotus',type:'smash',inputs:['gunpowder','moss','pinecone']},
+    {label:'Mars Rhino Beetle',type:'smash',inputs:['black_lotus','sunset_moth','sabertooth_longhorn']},
+    {label:'Hercules Beetle',type:'smash',inputs:['golden_scarab','pollen_adamantine','purple']},
+    {label:'Bronze Flower Transmute',type:'smash',inputs:['green','purple','junk_cube_t1']},
+    {label:'Mithril Flower Transmute',type:'smash',inputs:['green','any_mithril_beetle','junk_cube_t1']},
+    {label:'Adamantine Flower Transmute',type:'smash',inputs:['green','any_adamantine_beetle','junk_cube_t1']}
   ];
-  const RECIPE_VALUE = {
+  var RECIPE_VALUE = {
     'Hercules Beetle':100,'Mars Rhino Beetle':95,'Black Lotus':88,'Diamond Hammer':82,
     'Sabertooth Longhorn Beetle':78,'Sunset Moth':78,'Sabertooth Longhorn (Stag)':78,'Sabertooth Longhorn (Bomb)':78,
     'Sunset Moth (Stag)':78,'Sunset Moth (Bomb)':78,'Adamantine Pollen':75,'Adamantine Hammer':65,
@@ -236,627 +201,6 @@
     'Adamantine Flower Transmute':55,
     'Junk Tesseract':8,'Tin Hammer':6,'Tin Pollen':5,'Junk Cube':1
   };
-
-  /* ─── Progression ─── */
-  const ALL_BEETLES = ['green','ladybug','purple','pond','monarch','goliath','stag','bombardier',
-    'giraffe_weevil','pillbug','imperial_tortoise','sabertooth_longhorn','sunset_moth',
-    'mars_rhino','golden_scarab','hercules','skull','christmas'];
-  const ALL_FLOWERS = ['daisy','poppy','sunflower','marigold','gallic_rose','milk_thistle',
-    'royal_poinciana','camellia','morning_glory','pincushion','gazania','black_lotus'];
-  const COLLECTIBLES = new Set([...ALL_BEETLES, ...ALL_FLOWERS]);
-  const STAGES = [
-    {n:1,name:'Gathering',check:['green'],desc:'Farm beetles + junk'},
-    {n:2,name:'Pollen & Bridges',check:['pollen_tin'],desc:'Craft pollen, generate bridges'},
-    {n:3,name:'Mithril Beetles',check:['pond','monarch'],desc:'Craft Pond + Monarch'},
-    {n:4,name:'Adamantine Beetles',check:['bombardier','stag','goliath'],desc:'Craft Goliath/Stag/Bombardier'},
-    {n:5,name:'Rare Beetles',check:['giraffe_weevil','pillbug','imperial_tortoise'],desc:'Mithril flower + beetle'},
-    {n:6,name:'Epic Beetles',check:['sabertooth_longhorn','sunset_moth'],desc:'Adamantine flower + beetle'},
-    {n:7,name:'Endgame',check:['black_lotus','mars_rhino','hercules'],desc:'Black Lotus, Mars Rhino, Hercules'}
-  ];
-  function getStage(inv) {
-    let completed = 0;
-    for (const s of STAGES) {
-      if (s.check.every(function(k) { return (inv[k]||0) > 0; })) { completed = s.n; }
-      else { break; }
-    }
-    return completed;
-  }
-  function getNextStageGoals(inv, stage) {
-    if (stage >= 7) { return {next:null, goals:[]}; }
-    const next = STAGES[stage];
-    if (!next) { return {next:null, goals:[]}; }
-    const missing = next.check.filter(function(k) { return !(inv[k]||0); });
-    return {next:next, goals:missing.map(function(k) { return dn(k); })};
-  }
-  function getCollection(inv) {
-    var ownedB = ALL_BEETLES.filter(function(k) { return (inv[k]||0) > 0; });
-    var ownedF = ALL_FLOWERS.filter(function(k) { return (inv[k]||0) > 0; });
-    var missingB = ALL_BEETLES.filter(function(k) { return !(inv[k]||0); });
-    var missingF = ALL_FLOWERS.filter(function(k) { return !(inv[k]||0); });
-    return {ownedB:ownedB,ownedF:ownedF,missingB:missingB,missingF:missingF,totalB:ALL_BEETLES.length,totalF:ALL_FLOWERS.length};
-  }
-
-  /* ─── Filters ─── */
-  const BLOCKLIST = /^(svg|icon|button|slot|empty|more|smash|eject|assemble|home|search|left|right|go_back|show_password|claim|load|logo|dots|arrow|cheeseman|static\d*|beetleboy_logo|beetle_catch|craft|beetle_shader)$/i;
-  const PFP_HASH = /^(pfp_\d+|retart|remilio|radbro|default|[a-f0-9]{20,})$/i;
-
-  /* ─── Store with migration ─── */
-  function defaultSession() {
-    return {claims:0,hunts:0,cheeseClaims:0,cheeseGained:0,gains:[],totalXP:0,startTime:Date.now()};
-  }
-  function defaults() {
-    return {ver:CURRENT_VER,mergedInventory:{},currentHammer:null,ownedHammers:[],brokenHammers:[],discoveredHammers:[],
-      currentHammerBonus:null,currentHammerBreakChance:null,
-      timers:{},lastFullScan:0,lastPassiveScan:0,autoClaim:true,autoHunt:true,panelOpen:true,level:null,craftMode:null,
-      strategy:'endgame', // 'endgame' | 'broad' | 'flowers'
-      log:[],
-      stuckSince:0,stuckRefreshCount:0,
-      session:defaultSession()};
-  }
-  function normalizeSession(rawSession) {
-    var session = Object.assign(defaultSession(), rawSession || {});
-    var gains = [];
-    if (Array.isArray(session.gains)) {
-      gains = session.gains.slice();
-    } else if (session.gains && typeof session.gains === 'object') {
-      Object.keys(session.gains).forEach(function(name) {
-        var count = parseInt(session.gains[name], 10) || 0;
-        for (var i = 0; i < count; i++) { gains.push(name); }
-      });
-    } else if (Array.isArray(session.beetles)) {
-      gains = session.beetles.slice();
-    }
-    session.claims = parseInt(session.claims, 10) || 0;
-    session.hunts = parseInt(session.hunts, 10) || 0;
-    session.cheeseClaims = parseInt(session.cheeseClaims, 10) || 0;
-    session.cheeseGained = parseInt(session.cheeseGained, 10) || 0;
-    session.totalXP = parseInt(session.totalXP, 10) || 0;
-    if (!session.startTime || !isFinite(session.startTime)) { session.startTime = Date.now(); }
-    session.gains = gains;
-    return session;
-  }
-  function load() {
-    try {
-      // Try new key first
-      var raw = GM_getValue(STORE_KEY, null);
-      // Migrate from old key if needed
-      if (!raw) {
-        raw = GM_getValue(OLD_STORE_KEY, null);
-        if (raw) {
-          GM_setValue(STORE_KEY, raw);
-          console.log('[BC] Migrated store from v7 to v8 key');
-        }
-      }
-      if (!raw) { return defaults(); }
-      var parsed = JSON.parse(raw);
-      var p = Object.assign(defaults(), parsed);
-      p.session = normalizeSession((parsed || {}).session);
-      // Only wipe inventory on major version change (e.g. 9.x -> 10.x), not patches
-      var oldMajor = (p.ver || '0').split('.')[0];
-      var newMajor = CURRENT_VER.split('.')[0];
-      if (oldMajor !== newMajor) { p.mergedInventory = {}; p.log = []; }
-      if (p.stuckSince && Date.now() - p.stuckSince > 300000) {
-        p.stuckSince = 0;
-        p.stuckRefreshCount = 0;
-      }
-      p.ver = CURRENT_VER;
-      return p;
-    } catch(e) { return defaults(); }
-  }
-  function save() { try { GM_setValue(STORE_KEY, JSON.stringify(S)); } catch(e) {} }
-  function resetStore() { S = defaults(); save(); renderPanel(); }
-  var S = load();
-
-  /* ─── Activity Log ─── */
-  function logEvent(msg) {
-    var ts = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-    S.log.push(ts + ' ' + msg);
-    if (S.log.length > 30) { S.log = S.log.slice(-30); }
-    save();
-    var el = document.getElementById('bc8-log');
-    if (el) {
-      el.innerHTML = S.log.slice().reverse().map(function(l) { return '<div class="bc8-log-line">' + l + '</div>'; }).join('');
-    }
-  }
-
-  /* ─── Inventory Export ─── */
-  function exportInventory() {
-    var inv = S.mergedInventory || {};
-    var col = getCollection(inv);
-    var snapshot = {
-      timestamp: new Date().toISOString(),
-      level: S.level,
-      cheese: inv.cheese || 0,
-      hammer: S.currentHammer ? dn(S.currentHammer) : null,
-      brokenHammers: (S.brokenHammers||[]).map(dn),
-      stage: getStage(inv),
-      beetlesOwned: col.ownedB.length + '/' + col.totalB,
-      flowersOwned: col.ownedF.length + '/' + col.totalF,
-      missing: col.missingB.map(dn).concat(col.missingF.map(dn)),
-      inventory: {},
-      junkTotal: cnt(inv, ANY_JUNK),
-      scanConfidence: scanConfidence(),
-      lastFullScan: S.lastFullScan ? new Date(S.lastFullScan).toISOString() : null,
-      lastPassiveScan: S.lastPassiveScan ? new Date(S.lastPassiveScan).toISOString() : null,
-      session: {
-        claims: (S.session||{}).claims || 0,
-        hunts: (S.session||{}).hunts || 0,
-        cheeseClaims: (S.session||{}).cheeseClaims || 0,
-        duration: Math.round((Date.now() - ((S.session||{}).startTime || Date.now())) / 60000) + 'm',
-        totalXP: (S.session||{}).totalXP || 0,
-        gains: (function() {
-          var raw = (S.session||{}).gains || (S.session||{}).beetles || [];
-          var counts = {};
-          for (var gi = 0; gi < raw.length; gi++) { counts[raw[gi]] = (counts[raw[gi]]||0) + 1; }
-          return counts;
-        })()
-      }
-    };
-    // Build readable inventory (non-junk, non-hammer)
-    var keys = Object.keys(inv).filter(function(k) { return !JUNK_SET.has(k) && !SKIP_DISPLAY.has(k); })
-      .sort(function(a,b) { return (inv[b]||0) - (inv[a]||0); });
-    for (var i = 0; i < keys.length; i++) {
-      snapshot.inventory[dn(keys[i])] = inv[keys[i]];
-    }
-    return snapshot;
-  }
-
-  function downloadExport() {
-    var data = JSON.stringify(exportInventory(), null, 2);
-    var blob = new Blob([data], {type: 'application/json'});
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = 'beetle_inventory_' + new Date().toISOString().replace(/[:.]/g,'-').substring(0,19) + '.json';
-    a.click();
-    URL.revokeObjectURL(url);
-    logEvent('Inventory exported');
-  }
-
-  // Auto-append to log file on each full scan (via console for easy copy)
-  function logInventorySnapshot() {
-    var snap = exportInventory();
-    console.log('[BeetleCoach] Inventory snapshot:', JSON.stringify(snap));
-  }
-
-  /* ─── Helpers ─── */
-  function norm(raw) {
-    if (!raw) { return null; }
-    var k = String(raw).toLowerCase().trim().replace(/\.[a-z0-9]+$/i,'')
-      .replace(/%20/g,'_').replace(/[^\w]+/g,'_').replace(/^_+|_+$/g,'');
-    return ITEM_ALIASES[k] || k;
-  }
-  function dn(k) { return LABELS[k] || k; }
-  function cnt(inv, arr) { return arr.reduce(function(s,k) { return s + (inv[k]||0); }, 0); }
-  function tokenCount(inv, token) {
-    var group = TOKEN_GROUPS[token];
-    return group ? cnt(inv, group) : (inv[token]||0);
-  }
-  function tokHuman(t) {
-    var m = {any_junk:'any junk',any_tin_flower:'Tin flowers x2',any_bronze_flower:'Bronze flower',
-      any_mithril_flower:'Mithril flower',any_adamantine_flower:'Adamantine flower',
-      any_bronze_beetle:'Bronze beetle',any_mithril_beetle:'Mithril beetle',
-      any_adamantine_beetle:'Adamantine beetle'};
-    return m[t] || dn(t);
-  }
-  function canMake(r, inv) {
-    var needed = {};
-    for (var i = 0; i < r.inputs.length; i++) {
-      var t = r.inputs[i];
-      needed[t] = (needed[t]||0) + 1;
-    }
-    for (var token in needed) {
-      var times = needed[token];
-      var group = TOKEN_GROUPS[token];
-      if (group) { if (cnt(inv,group) < times) { return false; } }
-      else { if ((inv[token]||0) < times) { return false; } }
-    }
-    return true;
-  }
-  function isValid(k) { return k && !BLOCKLIST.test(k) && !PFP_HASH.test(k); }
-
-  /* ─── FIX 1: Layered Item Extraction ─── */
-  var _unresolvedCount = 0;
-  function resolveItemKey(itemEl, imgEl) {
-    // Source 1: background-image URL (primary)
-    if (imgEl) {
-      var bg = (imgEl.style && imgEl.style.backgroundImage) || '';
-      if (!bg || bg === 'none') {
-        try { bg = getComputedStyle(imgEl).backgroundImage || ''; } catch(e) {}
-      }
-      var m = bg.match(/\/beetle\/images\/icons\/[^/]+\/([^."')]+)\.(png|jpg|webp|gif|svg)/i);
-      if (m && m[1]) { return norm(m[1]); }
-    }
-    // Source 2: <img src> tag inside the image element
-    if (imgEl) {
-      var img = imgEl.querySelector('img') || (imgEl.tagName === 'IMG' ? imgEl : null);
-      if (img) {
-        var src = img.getAttribute('src') || '';
-        var m2 = src.match(/\/beetle\/images\/icons\/[^/]+\/([^."'?#]+)\.(png|jpg|webp|gif|svg)/i);
-        if (m2 && m2[1]) { return norm(m2[1]); }
-        // Fallback: any filename from src
-        var m3 = src.match(/\/([^/."'?#]+)\.(png|jpg|webp|gif|svg)/i);
-        if (m3 && m3[1]) { return norm(m3[1]); }
-      }
-    }
-    // Source 3: alt, title, aria-label
-    var candidates = imgEl ? [imgEl, itemEl] : [itemEl];
-    for (var ci = 0; ci < candidates.length; ci++) {
-      var el = candidates[ci];
-      if (!el) { continue; }
-      var txt = el.getAttribute('alt') || el.getAttribute('title') || el.getAttribute('aria-label') || '';
-      if (txt) { return norm(txt); }
-    }
-    return null;
-  }
-
-  /* ─── Scanning ─── */
-  function scanPage(sel, imgCls, cntCls) {
-    var r = {};
-    var unresolved = 0;
-    document.querySelectorAll(sel).forEach(function(item) {
-      var imgEl = item.querySelector(imgCls);
-      var k = resolveItemKey(item, imgEl);
-      if (!k || !isValid(k)) { unresolved++; return; }
-      var el = item.querySelector(cntCls);
-      var c = el ? (parseInt(el.textContent.trim(), 10) || 1) : 1;
-      r[k] = Math.max(r[k]||0, c);
-    });
-    _unresolvedCount += unresolved;
-    return r;
-  }
-
-  /* ─── FIX 8: Pagination with fingerprinting ─── */
-  function fingerprint(items) {
-    return Object.keys(items).sort().map(function(k) { return k + ':' + items[k]; }).join(',');
-  }
-
-  var _scanning = false;
-  async function fullScan() {
-    if (_scanning) { return; }
-    var readiness = automationReadiness();
-    if (!readiness.ok) {
-      if (readiness.cooloff) { holdNavigation(readiness.reason); }
-      else { logThrottled('scan-skip:' + readiness.reason, 'Scan skipped: ' + readiness.reason + '.', LOG_THROTTLE_MS); }
-      parseTimers(); parseLevel(); parseCraftMode();
-      renderPanel();
-      return;
-    }
-    _scanning = true;
-    _unresolvedCount = 0;
-    var oldInv = Object.assign({}, S.mergedInventory);
-    try {
-      var merged = {};
-      var merge = function(items) { for (var k in items) { merged[k] = Math.max(merged[k]||0, items[k]); } };
-      // Crafting module with fingerprint set pagination
-      var seenFP = {};
-      merge(scanPage('.crafting-module__inventory-grid .crafting-module__beetle-item','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
-      for (var i = 0; i < 20; i++) {
-        var more = document.querySelector('.crafting-module__pagination-button');
-        if (!more || more.disabled || more.classList.contains('disabled')) { break; }
-        more.click();
-        await new Promise(function(r) { setTimeout(r, 200); });
-        var page = scanPage('.crafting-module__inventory-grid .crafting-module__beetle-item','.crafting-module__beetle-img','.crafting-module__beetle-item-count');
-        var fp = fingerprint(page);
-        if (seenFP[fp]) { break; } // Already seen this page (loop detected)
-        seenFP[fp] = true;
-        merge(page);
-      }
-      // Catch module with fingerprint set pagination
-      var seenFP2 = {};
-      merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
-      for (var j = 0; j < 20; j++) {
-        var more2 = document.querySelector('.beetle-catch-module__pagination-button');
-        if (!more2 || more2.disabled || more2.classList.contains('disabled')) { break; }
-        more2.click();
-        await new Promise(function(r) { setTimeout(r, 200); });
-        var page2 = scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count');
-        var fp2 = fingerprint(page2);
-        if (seenFP2[fp2]) { break; }
-        seenFP2[fp2] = true;
-        merge(page2);
-      }
-      var scanSucceeded = Object.keys(merged).length > 0;
-      if (scanSucceeded) {
-        S.mergedInventory = merged;
-        var changes = [];
-        for (var k in merged) {
-          var old = oldInv[k] || 0;
-          if (merged[k] > old && !JUNK_SET.has(k) && k !== 'cheese') {
-            changes.push(dn(k) + ' +' + (merged[k] - old));
-            // Track high-tier beetle catches in session
-            if (ALL_BEETLES.indexOf(k) > -1 && k !== 'green') {
-              if (!S.session.gains) { S.session.gains = S.session.beetles || []; }
-              for (var bi = 0; bi < (merged[k] - old); bi++) { S.session.gains.push(dn(k)); }
-            }
-          }
-        }
-        var junkDiff = cnt(merged, ANY_JUNK) - cnt(oldInv, ANY_JUNK);
-        if (junkDiff > 0) { changes.push('Junk +' + junkDiff); }
-        var cheeseDiff = (merged.cheese||0) - (oldInv.cheese||0);
-        if (cheeseDiff !== 0) { changes.push('Cheese ' + (cheeseDiff > 0 ? '+' : '') + cheeseDiff); }
-        var summary = changes.length ? changes.join(', ') : 'no changes';
-        if (_unresolvedCount > 0) { summary += ' (' + _unresolvedCount + ' unresolved)'; }
-        logEvent('Scan: ' + summary);
-      } else {
-        logEvent('Scan: no items found' + (_unresolvedCount ? ' (' + _unresolvedCount + ' unresolved)' : ''));
-      }
-      if (scanSucceeded) {
-        S.lastFullScan = Date.now();
-        S.lastPassiveScan = Date.now();
-        logInventorySnapshot();
-      }
-    } finally { _scanning = false; }
-    parseTimers(); parseHammer(); parseLevel(); parseCraftMode();
-    save();
-    renderPanel();
-  }
-
-  /* ─── Passive inventory refresh (no pagination, visibility-gated) ─── */
-  // Passive scans only CONFIRM existing items, never inflate authoritative inventory
-  function passiveScan() {
-    if (_scanning) { return; }
-    if (document.hidden) { return; }
-    var hasGame = document.querySelector('.crafting-module__beetle-item') || document.querySelector('.beetle-catch-module__beetle-item');
-    if (!hasGame) { return; }
-    var vis = {};
-    var merge = function(items) { for (var k in items) { vis[k] = Math.max(vis[k]||0, items[k]); } };
-    merge(scanPage('.crafting-module__inventory-grid .crafting-module__beetle-item','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
-    merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
-    if (Object.keys(vis).length > 0) {
-      var updated = false;
-      for (var k in vis) {
-        if (S.mergedInventory.hasOwnProperty(k)) {
-          // Update existing items
-          if (vis[k] !== S.mergedInventory[k]) {
-            S.mergedInventory[k] = vis[k];
-            updated = true;
-          }
-        } else if (isValid(k) && !BLOCKLIST.test(k) && !PFP_HASH.test(k) && vis[k] === 1 && LABELS[k]) {
-          // New item: add to inventory but defer logging until confirmed by second sight
-          if (!S._pendingItems) { S._pendingItems = {}; }
-          if (S._pendingItems[k]) {
-            // Second sighting — confirmed, add and log
-            S.mergedInventory[k] = vis[k];
-            updated = true;
-            logEvent('New item confirmed: ' + dn(k));
-            delete S._pendingItems[k];
-          } else {
-            // First sighting — mark pending, don't add yet
-            S._pendingItems[k] = Date.now();
-          }
-        }
-      }
-      // Prune stale pending items (older than 5 minutes)
-      if (S._pendingItems) {
-        var now = Date.now();
-        for (var pk in S._pendingItems) {
-          if (now - S._pendingItems[pk] > 300000) { delete S._pendingItems[pk]; }
-        }
-      }
-      S.lastPassiveScan = Date.now();
-      if (updated) { save(); }
-    }
-    parseTimers(); parseHammer();
-  }
-
-  /* ─── Timer refresh (in-place DOM update) ─── */
-  function refreshTimers() {
-    if (_scanning) { return; }
-    parseTimers();
-    var fmtT = function(v) {
-      if (!v) { return '\u2014'; }
-      if (/ready/i.test(v)) { return '<span class="bc8-badge bc8-ready">Ready</span>'; }
-      return '<span class="bc8-badge bc8-countdown">' + v + '</span>';
-    };
-    var bc = document.getElementById('bc8-t-claim'); if (bc) { bc.innerHTML = fmtT(S.timers.beetleCatch); }
-    var hc = document.getElementById('bc8-t-hunt'); if (hc) { hc.innerHTML = fmtT(S.timers.huntCooldown); }
-    var dc = document.getElementById('bc8-t-cheese'); if (dc) { dc.innerHTML = fmtT(S.timers.dailyCheese); }
-    // Update freshness chip (three-band)
-    var fc = document.getElementById('bc8-fresh'); if (fc) {
-      var conf = scanConfidence();
-      var cls = conf === 'fresh' ? 'bc8-fresh-ok' : (conf === 'warming' ? 'bc8-warming' : 'bc8-stale');
-      fc.className = 'bc8-badge ' + cls;
-      fc.textContent = conf === 'stale' ? 'STALE' : (conf === 'warming' ? scanAge() : scanAge());
-    }
-  }
-
-  /* ─── Parse Functions ─── */
-  function parseTimers() {
-    var t = {beetleCatch:null, dailyCheese:null, huntCooldown:null};
-    var bc = document.querySelector('.beetle-game-nav .info span:last-child');
-    if (bc) { var v = bc.textContent.trim(); if (/\d/.test(v)) { t.beetleCatch = v; } }
-    if (!t.beetleCatch) {
-      var nav = document.querySelector('.beetle-game-nav .info');
-      if (nav && /ready/i.test(nav.textContent)) { t.beetleCatch = 'Ready!'; }
-    }
-    var dc = document.querySelector('.cheese-claim-nav .info span:last-child');
-    if (dc) { var v2 = dc.textContent.trim(); if (/\d/.test(v2)) { t.dailyCheese = v2; } }
-    if (!t.dailyCheese) {
-      var navC = document.querySelector('.cheese-claim-nav .info');
-      if (navC && /ready/i.test(navC.textContent)) { t.dailyCheese = 'Ready!'; }
-    }
-    var cooldown = document.querySelector('.beetle-catch-module__cooldown-timer');
-    if (cooldown) {
-      var v3 = cooldown.textContent.trim().replace(/\s*to\s+next\s+claim\s*/i,'').trim();
-      if (/\d/.test(v3)) { t.beetleCatch = v3; }
-    }
-    var huntCost = document.querySelector('.beetle-catch-module__hunt-button-cheese-cost');
-    if (huntCost) {
-      var txt = huntCost.textContent.trim();
-      if (/cooldown/i.test(txt)) {
-        var cleaned = txt.replace(/\s*cooldown\s*/i,'').trim();
-        if (/\d/.test(cleaned)) { t.huntCooldown = cleaned; }
-      } else if (/cheese/i.test(txt)) { t.huntCooldown = 'Ready!'; }
-    }
-    S.timers = t;
-  }
-  function parseHammer() {
-    var owned = [];   // Available hammers (not broken)
-    var broken = [];  // Broken hammers (--empty class)
-    var discovered = []; // All discovered (owned + broken)
-    document.querySelectorAll('.crafting-module__hammer-row .crafting-module__hammer-slot').forEach(function(s) {
-      if (s.classList.contains('crafting-module__hammer-slot--undiscovered')) { return; }
-      var img = s.querySelector('.crafting-module__beetle-img'); if (!img) { return; }
-      var k = resolveItemKey(s, img);
-      if (k && k.indexOf('hammer_t') === 0) {
-        discovered.push(k);
-        if (s.classList.contains('crafting-module__hammer-slot--empty')) {
-          broken.push(k);
-        } else {
-          owned.push(k);
-        }
-      }
-    });
-    // Deduplicate and sort
-    function dedupe(arr) { var s = {}; return arr.filter(function(v) { return s[v] ? false : (s[v]=true); }); }
-    owned = dedupe(owned);
-    owned.sort(function(a,b) { return HAMMER_TIERS.indexOf(b) - HAMMER_TIERS.indexOf(a); });
-    S.ownedHammers = owned;
-    S.brokenHammers = dedupe(broken);
-    S.discoveredHammers = dedupe(discovered);
-    S.currentHammer = owned[0] || null;
-    var st = S.currentHammer ? HAMMER_STATS[S.currentHammer] : null;
-    S.currentHammerBonus = st ? st.bonus : null;
-    // Only reset break chance to base if we DON'T have a live reading
-    if (!S.hammerBreakIsLive || S.currentHammer !== S._lastProbedHammer) {
-      S.currentHammerBreakChance = st ? st.baseBreak : null;
-      S.hammerBreakIsLive = false;
-    }
-    // Try to read live break% — only if crafting module visible and not probed recently
-    var shouldProbe = S.currentHammer && owned.length > 0 && (!S._lastHammerProbe || Date.now() - S._lastHammerProbe > 60000);
-    if (shouldProbe && document.querySelector('.crafting-module')) {
-      S._lastHammerProbe = Date.now();
-      var currentIdx = HAMMER_TIERS.indexOf(S.currentHammer);
-      var slots = document.querySelectorAll('.crafting-module__hammer-row .crafting-module__hammer-slot');
-      if (slots[currentIdx] && !slots[currentIdx].classList.contains('crafting-module__hammer-slot--undiscovered')) {
-        var slot = slots[currentIdx];
-        slot.dispatchEvent(new MouseEvent('mouseenter', {bubbles:true}));
-        slot.dispatchEvent(new MouseEvent('mouseover', {bubbles:true}));
-        setTimeout(function() {
-          var body = document.body.innerText;
-          var curM = body.match(/CURRENT BREAK CHANCE:\s*(\d+)%/i);
-          if (curM) {
-            S.currentHammerBreakChance = parseInt(curM[1]);
-            S.hammerBreakIsLive = true;
-            S._lastProbedHammer = S.currentHammer;
-            save();
-            // Update UI in-place
-            var el = document.getElementById('bc8-hammer-break');
-            if (el) { el.textContent = S.currentHammerBreakChance + '% break'; }
-          }
-          slot.dispatchEvent(new MouseEvent('mouseleave', {bubbles:true}));
-        }, 400);
-      }
-    }
-  }
-  function parseLevel() {
-    var el = document.querySelector('.beetle-card__level');
-    if (el) {
-      var m = el.textContent.match(/(\d+)/);
-      if (m) {
-        var newLevel = parseInt(m[1], 10);
-        if (S.level && newLevel > S.level) {
-          logEvent('LEVEL UP! ' + S.level + ' -> ' + newLevel);
-        }
-        S.level = newLevel;
-      }
-    }
-    // Parse XP from chat — track post count to avoid double-counting
-    var posts = document.querySelectorAll('.postBody');
-    var xpValues = [];
-    posts.forEach(function(p) {
-      var text = p.textContent || '';
-      var xpM = text.match(/\+(\d+)\s*XP/i);
-      if (xpM) { xpValues.push(parseInt(xpM[1], 10)); }
-    });
-    if (!S._xpPostsSeen) { S._xpPostsSeen = 0; }
-    if (xpValues.length > S._xpPostsSeen) {
-      if (!S.session.totalXP) { S.session.totalXP = 0; }
-      S.session.totalXP += xpValues.slice(S._xpPostsSeen).reduce(function(sum, xp) { return sum + xp; }, 0);
-      S._xpPostsSeen = xpValues.length;
-    }
-  }
-  function parseCraftMode() {
-    var cm = document.querySelector('.crafting-module');
-    if (!cm) { S.craftMode = null; return; }
-    S.craftMode = cm.classList.contains('crafting-module--smash') ? 'Smash' : 'Assemble';
-  }
-
-  /* ─── Staleness ─── */
-  // Three-band confidence: fresh (full scan recent), warming (passive recent), stale (nothing recent)
-  function scanConfidence() {
-    var now = Date.now();
-    var fullAge = now - (S.lastFullScan || 0);
-    var passiveAge = now - (S.lastPassiveScan || 0);
-    if (fullAge < STALE_THRESHOLD) { return 'fresh'; }
-    if (passiveAge < STALE_THRESHOLD) { return 'warming'; }
-    return 'stale';
-  }
-  function isStale() { return scanConfidence() === 'stale'; }
-  function scanAge() {
-    var conf = scanConfidence();
-    var ts = (conf === 'warming') ? S.lastPassiveScan : S.lastFullScan;
-    if (!ts) { return 'never'; }
-    var s = Math.round((Date.now() - ts) / 1000);
-    var age = s < 60 ? s + 's' : Math.round(s/60) + 'm';
-    if (conf === 'warming') { return 'Warm ' + age; }
-    return 'Fresh ' + age;
-  }
-
-  /* ─── Recommendation Engine ─── */
-  // Pollen/transmute recipes that deliberately consume flowers
-  var FLOWER_CONSUMING_RECIPES = new Set([
-    'Tin Pollen','Bronze Pollen','Mithril Pollen','Adamantine Pollen',
-    'Bronze Flower Transmute','Mithril Flower Transmute'
-  ]);
-
-  function createsMissingCollectible(recipe, inv) {
-    var outputKey = RECIPE_OUTPUT[recipe.label];
-    if (outputKey && COLLECTIBLES.has(outputKey) && !(inv[outputKey]||0)) { return true; }
-    if (recipe.label === 'Bronze Flower Transmute') {
-      return BRONZE_FLOWERS.some(function(k) { return !(inv[k]||0); });
-    }
-    if (recipe.label === 'Mithril Flower Transmute') {
-      return MITHRIL_FLOWERS.some(function(k) { return !(inv[k]||0); });
-    }
-    if (recipe.label === 'Adamantine Flower Transmute') {
-      return ADAMANTINE_FLOWERS.some(function(k) { return !(inv[k]||0); });
-    }
-    return false;
-  }
-
-  function wouldConsumeLastCollectible(recipe, inv) {
-    // In Flowers mode, allow pollen/transmute recipes to consume singleton flowers
-    // That's the explicit purpose of Flowers strategy
-    if (S.strategy === 'flowers' && FLOWER_CONSUMING_RECIPES.has(recipe.label)) {
-      return false; // Let it through
-    }
-
-    var outputKey = RECIPE_OUTPUT[recipe.label] || null;
-    var canSpendForNewCollectible = createsMissingCollectible(recipe, inv);
-    for (var i = 0; i < recipe.inputs.length; i++) {
-      var token = recipe.inputs[i];
-      var group = TOKEN_GROUPS[token];
-      if (group) {
-        for (var gi = 0; gi < group.length; gi++) {
-          if ((inv[group[gi]]||0) > 0 && COLLECTIBLES.has(group[gi]) && (inv[group[gi]]||0) <= 1) {
-            var hasAlt = false;
-            for (var ai = 0; ai < group.length; ai++) {
-              if (ai !== gi && (inv[group[ai]]||0) > 1) { hasAlt = true; break; }
-            }
-            if (!hasAlt && !(canSpendForNewCollectible && !isProtectedForGoal(group[gi], inv, outputKey))) { return true; }
-          }
-        }
-      } else if (COLLECTIBLES.has(token) && (inv[token]||0) <= 1) {
-        if (!(canSpendForNewCollectible && !isProtectedForGoal(token, inv, outputKey))) { return true; }
-      }
-      if (!group && isProtectedForGoal(token, inv, outputKey)) { return true; }
-    }
-    return false;
-  }
-
-  // Map recipe labels to their output item key (for "already owned" filtering)
   var RECIPE_OUTPUT = {
     'Pond Beetle':'pond','Monarch':'monarch','Monarch (alt)':'monarch',
     'Goliath Beetle':'goliath','Goliath Beetle (alt)':'goliath',
@@ -868,178 +212,8 @@
     'Sunset Moth':'sunset_moth','Sunset Moth (Stag)':'sunset_moth','Sunset Moth (Bomb)':'sunset_moth',
     'Mars Rhino Beetle':'mars_rhino','Hercules Beetle':'hercules','Black Lotus':'black_lotus'
   };
-  // Items that are consumed as ingredients in higher recipes (need duplicates)
   var NEEDED_AS_INGREDIENT = new Set(['sabertooth_longhorn','sunset_moth','black_lotus']);
-  // Protect one copy of endgame ingredients if higher goals are still missing
-  function isProtectedForGoal(key, inv, recipeOutputKey) {
-    // Midgame: protect Pond/Monarch while Adamantine beetles still incomplete
-    var needsAdamantine = !(inv['bombardier']||0) || !(inv['stag']||0) || !(inv['goliath']||0);
-    if (needsAdamantine) {
-      if (recipeOutputKey === 'bombardier' || recipeOutputKey === 'stag' || recipeOutputKey === 'goliath') { return false; }
-      if ((key === 'pond' || key === 'monarch') && (inv[key]||0) <= 2) {
-        return true; // Keep at least 2 of each for progression recipes
-      }
-    }
-    // Protect Mithril artifacts for Black Lotus path (needs all 3)
-    if (!(inv['black_lotus']||0)) {
-      if (recipeOutputKey === 'black_lotus') { return false; }
-      if ((key === 'pinecone' || key === 'moss' || key === 'gunpowder') && (inv[key]||0) <= 1) {
-        return true;
-      }
-    }
-    // Protect Adamantine flowers for Epic beetle path
-    if (!(inv['sunset_moth']||0)) {
-      if (recipeOutputKey === 'sunset_moth') { return false; }
-      if (key === 'gazania' && (inv[key]||0) <= 1) { return true; }
-    }
-    if (!(inv['sabertooth_longhorn']||0)) {
-      if (recipeOutputKey === 'sabertooth_longhorn') { return false; }
-      if (key === 'pincushion' && (inv[key]||0) <= 1) { return true; }
-    }
-    // Note: Mithril Pollen is NOT protected here because consuming it
-    // in the Mithril Bridge is the primary way to advance the Goliath path.
-    // Protecting it creates a deadlock where the engine blocks its own progression.
-    // Endgame: protect Mars Rhino ingredients
-    if (!(inv['mars_rhino']||0)) {
-      if (recipeOutputKey === 'mars_rhino') { return false; }
-      if ((key === 'black_lotus' || key === 'sunset_moth' || key === 'sabertooth_longhorn') && (inv[key]||0) <= 1) {
-        return true;
-      }
-    }
-    // Endgame: protect Hercules ingredients
-    if (!(inv['hercules']||0)) {
-      if (recipeOutputKey === 'hercules') { return false; }
-      if ((key === 'golden_scarab' || key === 'pollen_adamantine') && (inv[key]||0) <= 1) {
-        return true;
-      }
-    }
-    return false;
-  }
 
-  function getDirectCrafts(inv) {
-    var ht = S.ownedHammers.length ? Math.max.apply(null, S.ownedHammers.map(function(h) { return HAMMER_TIERS.indexOf(h); })) : -1;
-    return RECIPES.filter(function(r) {
-      if (r.label === 'Junk Cube') { return false; }
-      if (!canMake(r, inv)) { return false; }
-      // Hammer filter: skip owned tiers, but ALLOW re-crafting broken hammers
-      var hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
-        'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'}[r.label];
-      if (hk) {
-        var isBroken = S.brokenHammers && S.brokenHammers.indexOf(hk) > -1;
-        var ot = HAMMER_TIERS.indexOf(hk);
-        if (!isBroken && (ot<=ht||ot>ht+1)) { return false; }
-      }
-      // Don't recommend crafting a beetle/flower you already own
-      // UNLESS it's needed as an ingredient for a higher recipe
-      var outputKey = RECIPE_OUTPUT[r.label];
-      if (outputKey && COLLECTIBLES.has(outputKey) && (inv[outputKey]||0) > 0) {
-        if (!NEEDED_AS_INGREDIENT.has(outputKey)) { return false; }
-      }
-      // Collection protection
-      if (wouldConsumeLastCollectible(r, inv)) { return false; }
-      return true;
-    }).sort(function(a,b) { return (RECIPE_VALUE[b.label]||5) - (RECIPE_VALUE[a.label]||5); });
-  }
-
-  /* ─── Smart group consumption: strategic preference within groups ─── */
-  // Lower = consume first (cheaper/more expendable)
-  var STRATEGIC_VALUE = {
-    // Bronze beetles: Ladybug is cheaper to use than Purple (Purple has more high-tier recipe utility)
-    ladybug: 1, purple: 3,
-    // Mithril beetles: both are bottlenecks, equal
-    pond: 5, monarch: 5,
-    // Mithril flowers: Royal Poinciana/Camellia/Morning Glory all similar
-    royal_poinciana: 4, camellia: 4, morning_glory: 4,
-    // Bronze flowers
-    marigold: 2, gallic_rose: 2, milk_thistle: 2,
-    // Adamantine flowers
-    pincushion: 6, gazania: 6
-  };
-  function consumeInputs(vInv, recipe) {
-    var vi = Object.assign({}, vInv);
-    for (var i = 0; i < recipe.inputs.length; i++) {
-      var token = recipe.inputs[i];
-      var group = TOKEN_GROUPS[token];
-      if (group) {
-        var available = group.filter(function(k) { return (vi[k]||0) > 0; });
-        available.sort(function(a,b) {
-          // 1. Non-collectibles before collectibles
-          var aCol = COLLECTIBLES.has(a) ? 1 : 0;
-          var bCol = COLLECTIBLES.has(b) ? 1 : 0;
-          if (aCol !== bCol) { return aCol - bCol; }
-          // 2. Duplicates before singletons (never consume last copy)
-          var aSingle = (vi[a]||0) <= 1 ? 1 : 0;
-          var bSingle = (vi[b]||0) <= 1 ? 1 : 0;
-          if (aSingle !== bSingle) { return aSingle - bSingle; }
-          // 3. Lower strategic value first (expendable before precious)
-          var aVal = STRATEGIC_VALUE[a] || 0;
-          var bVal = STRATEGIC_VALUE[b] || 0;
-          if (aVal !== bVal) { return aVal - bVal; }
-          // 4. Highest quantity first (consume from abundance)
-          return (vi[b]||0) - (vi[a]||0);
-        });
-        if (available.length > 0) { vi[available[0]]--; }
-      } else {
-        if ((vi[token]||0) > 0) { vi[token]--; }
-      }
-    }
-    return vi;
-  }
-
-  /* ─── Goal-Directed Progression Engine ─── */
-  // ENDGAME: Shortest path to Mars Rhino + Hercules. Skips side-collection.
-  // Focuses: Goliath -> Sunset Moth -> Black Lotus -> Mars Rhino -> Hercules
-  var ENDGAME_CHAIN = [
-    {key:'goliath',recipe:'Goliath Beetle',prereqs:['pinecone'],via:'Mithril Bridge for Pinecone'},
-    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','any_adamantine_beetle'],via:'Need Gazania (transmute from any Adamantine beetle)'},
-    {key:'black_lotus',recipe:'Black Lotus',prereqs:['gunpowder','moss','pinecone'],via:'Need ALL 3 Mithril artifacts (multiple bridge runs)'},
-    {key:'mars_rhino',recipe:'Mars Rhino Beetle',prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'Black Lotus + Sunset Moth + Sabertooth'},
-    {key:'hercules',recipe:'Hercules Beetle',prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab is drop-only (Diamond rarity)'}
-  ];
-
-  // BROAD: Collect EVERY missing beetle and flower. Prioritize what's closest to craftable.
-  // Different from Endgame: includes ALL missing items, not just Mars Rhino path.
-  var BROAD_CHAIN = [
-    // Bronze pollen first (powers everything downstream)
-    {key:'pollen_bronze',recipe:'Bronze Pollen',prereqs:[],via:'Assemble 2 Bronze flowers', minQty:3},
-    // Adamantine beetles — all 3
-    {key:'goliath',recipe:'Goliath Beetle',prereqs:['pinecone'],via:'Mithril Bridge (RNG) for Pinecone'},
-    {key:'stag',recipe:'Stag Beetle',prereqs:['moss'],via:'Mithril Bridge (RNG) for Moss'},
-    {key:'bombardier',recipe:'Bombardier Beetle',prereqs:['gunpowder'],via:'Mithril Bridge (RNG) for Gunpowder'},
-    // Missing flowers
-    {key:'gazania',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Transmute: Green + any Adamantine beetle + Junk Cube'},
-    {key:'pincushion',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Transmute: Green + any Adamantine beetle + Junk Cube'},
-    {key:'black_lotus',recipe:'Black Lotus',prereqs:['gunpowder','moss','pinecone'],via:'All 3 Mithril artifacts'},
-    // Epic beetles
-    {key:'sabertooth_longhorn',recipe:'Sabertooth Longhorn Beetle',prereqs:['pincushion','any_adamantine_beetle'],via:'Pincushion + any Adamantine beetle'},
-    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','any_adamantine_beetle'],via:'Gazania + any Adamantine beetle'},
-    // Legendary
-    {key:'mars_rhino',recipe:'Mars Rhino Beetle',prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'All 3 endgame pieces'},
-    {key:'hercules',recipe:'Hercules Beetle',prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab (drop-only) + Adamantine Pollen'}
-  ];
-
-  // FLOWERS: Build the pollen pipeline. Prioritize flowers, pollens, and bridges.
-  // For players who need to stockpile materials before pushing beetle progression.
-  var FLOWER_CHAIN = [
-    // Priority 1: Stockpile Bronze Pollen (need many — pipeline fuel)
-    {key:'pollen_bronze',recipe:'Bronze Pollen',prereqs:[],via:'Assemble 2 Bronze flowers. Farm: Green + Purple + Junk Cube.', minQty:5},
-    // Priority 2: Use Bronze Pollen for bridges
-    {key:'nectar',recipe:'Nectar / Cattail Bridge',prereqs:['pollen_bronze'],via:'Bronze beetle + Bronze Pollen', minQty:3},
-    {key:'cattail',recipe:'Nectar / Cattail Bridge',prereqs:['pollen_bronze'],via:'Bronze beetle + Bronze Pollen', minQty:3},
-    // Priority 3: Mithril Pollen (need several for artifact runs)
-    {key:'pollen_mithril',recipe:'Mithril Pollen',prereqs:[],via:'Assemble 2 Mithril flowers (costly!).', minQty:3},
-    // Priority 4: All 3 Mithril artifacts
-    {key:'pinecone',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG 1/3)'},
-    {key:'moss',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG 1/3)'},
-    {key:'gunpowder',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen (RNG 1/3)'},
-    // Priority 5: Adamantine flowers
-    {key:'gazania',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Transmute: Green + any Adamantine beetle + Junk Cube'},
-    {key:'pincushion',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Transmute: Green + any Adamantine beetle + Junk Cube'},
-    // Priority 6: Adamantine Pollen
-    {key:'pollen_adamantine',recipe:'Adamantine Pollen',prereqs:[],via:'Assemble Pincushion + Gazania'}
-  ];
-
-  // Find the NEXT progression goal and what concrete step advances it
   var PREREQ_RECIPES = {
     'pinecone':['Pinecone / Moss / Gunpowder Bridge'],'moss':['Pinecone / Moss / Gunpowder Bridge'],
     'gunpowder':['Pinecone / Moss / Gunpowder Bridge'],
@@ -1047,1121 +221,509 @@
     'pollen_tin':['Tin Pollen'],'pollen_bronze':['Bronze Pollen'],
     'pollen_mithril':['Mithril Pollen'],'pollen_adamantine':['Adamantine Pollen'],
     'gazania':['Adamantine Flower Transmute'],'pincushion':['Adamantine Flower Transmute'],
-    'any_adamantine_beetle':['Goliath Beetle','Goliath Beetle (alt)','Stag Beetle','Bombardier Beetle','Bombardier Beetle (alt)']
+    'any_adamantine_beetle':['Goliath Beetle','Goliath Beetle (alt)','Stag Beetle','Bombardier Beetle','Bombardier Beetle (alt)'],
+    'junk_cube_t1':['Junk Cube'],'junk_cube_t2':['Junk Tesseract']
   };
 
-  function getGoalRecipes(goal) {
-    if (goal.key === 'gazania' || goal.key === 'pincushion') {
-      return RECIPES.filter(function(r) { return r.label === 'Adamantine Flower Transmute'; });
+  var STAGES = [
+    {n:1,name:'Gathering',check:['green']},
+    {n:2,name:'Pollen & Bridges',check:['pollen_tin']},
+    {n:3,name:'Mithril Beetles',check:['pond','monarch']},
+    {n:4,name:'Adamantine Beetles',check:['bombardier','stag','goliath']},
+    {n:5,name:'Rare Beetles',check:['giraffe_weevil','pillbug','imperial_tortoise']},
+    {n:6,name:'Epic Beetles',check:['sabertooth_longhorn','sunset_moth']},
+    {n:7,name:'Endgame',check:['black_lotus','mars_rhino','hercules']}
+  ];
+  var ENDGAME_CHAIN = [
+    {key:'goliath',recipe:'Goliath Beetle',prereqs:['pinecone'],via:'Mithril Bridge for Pinecone'},
+    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','any_adamantine_beetle'],via:'Need Gazania'},
+    {key:'black_lotus',recipe:'Black Lotus',prereqs:['gunpowder','moss','pinecone'],via:'All 3 Mithril artifacts'},
+    {key:'mars_rhino',recipe:'Mars Rhino Beetle',prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'Black Lotus + Sunset + Sabertooth'},
+    {key:'hercules',recipe:'Hercules Beetle',prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab is drop-only'}
+  ];
+  var BROAD_CHAIN = [
+    {key:'pollen_bronze',recipe:'Bronze Pollen',prereqs:[],via:'Assemble 2 Bronze flowers',minQty:3},
+    {key:'goliath',recipe:'Goliath Beetle',prereqs:['pinecone'],via:'Mithril Bridge for Pinecone'},
+    {key:'stag',recipe:'Stag Beetle',prereqs:['moss'],via:'Mithril Bridge for Moss'},
+    {key:'bombardier',recipe:'Bombardier Beetle',prereqs:['gunpowder'],via:'Mithril Bridge for Gunpowder'},
+    {key:'gazania',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Green + Adamantine beetle + Junk Cube'},
+    {key:'pincushion',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Green + Adamantine beetle + Junk Cube'},
+    {key:'black_lotus',recipe:'Black Lotus',prereqs:['gunpowder','moss','pinecone'],via:'All 3 Mithril artifacts'},
+    {key:'sabertooth_longhorn',recipe:'Sabertooth Longhorn Beetle',prereqs:['pincushion','any_adamantine_beetle'],via:'Pincushion + Adamantine beetle'},
+    {key:'sunset_moth',recipe:'Sunset Moth',prereqs:['gazania','any_adamantine_beetle'],via:'Gazania + Adamantine beetle'},
+    {key:'mars_rhino',recipe:'Mars Rhino Beetle',prereqs:['black_lotus','sunset_moth','sabertooth_longhorn'],via:'All 3 endgame pieces'},
+    {key:'hercules',recipe:'Hercules Beetle',prereqs:['golden_scarab','pollen_adamantine'],via:'Golden Scarab + Adamantine Pollen'}
+  ];
+  var FLOWER_CHAIN = [
+    {key:'pollen_bronze',recipe:'Bronze Pollen',prereqs:[],via:'Assemble 2 Bronze flowers',minQty:5},
+    {key:'nectar',recipe:'Nectar / Cattail Bridge',prereqs:['pollen_bronze'],via:'Bronze beetle + Bronze Pollen',minQty:3},
+    {key:'cattail',recipe:'Nectar / Cattail Bridge',prereqs:['pollen_bronze'],via:'Bronze beetle + Bronze Pollen',minQty:3},
+    {key:'pollen_mithril',recipe:'Mithril Pollen',prereqs:[],via:'Assemble 2 Mithril flowers',minQty:3},
+    {key:'pinecone',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen'},
+    {key:'moss',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen'},
+    {key:'gunpowder',recipe:'Pinecone / Moss / Gunpowder Bridge',prereqs:['pollen_mithril'],via:'Mithril beetle + Mithril Pollen'},
+    {key:'gazania',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Green + Adamantine beetle + Junk Cube'},
+    {key:'pincushion',recipe:'Adamantine Flower Transmute',prereqs:[],via:'Green + Adamantine beetle + Junk Cube'},
+    {key:'pollen_adamantine',recipe:'Adamantine Pollen',prereqs:[],via:'Assemble Pincushion + Gazania'}
+  ];
+  var FLOWER_CONSUMING = new Set(['Tin Pollen','Bronze Pollen','Mithril Pollen','Adamantine Pollen','Bronze Flower Transmute','Mithril Flower Transmute']);
+  var BLOCKLIST = /^(svg|icon|button|slot|empty|more|smash|eject|assemble|home|search|left|right|go_back|show_password|claim|load|logo|dots|arrow|cheeseman|static\d*|beetleboy_logo|beetle_catch|craft|beetle_shader)$/i;
+  var PFP_HASH = /^(pfp_\d+|retart|remilio|radbro|default|[a-f0-9]{20,})$/i;
+
+  /* ═══════════════════════════════════════════════════════
+     3. HELPERS
+     ═══════════════════════════════════════════════════════ */
+  function norm(raw) { if (!raw) return null; var k = String(raw).toLowerCase().trim().replace(/\.[a-z0-9]+$/i,'').replace(/%20/g,'_').replace(/[^\w]+/g,'_').replace(/^_+|_+$/g,''); return ITEM_ALIASES[k] || k; }
+  function dn(k) { return LABELS[k] || k; }
+  function cnt(inv, arr) { return arr.reduce(function(s,k) { return s + (inv[k]||0); }, 0); }
+  function tokenCount(inv, t) { var g = TOKEN_GROUPS[t]; return g ? cnt(inv,g) : (inv[t]||0); }
+  function tokHuman(t) { var m = {any_junk:'any junk',any_tin_flower:'Tin flowers x2',any_bronze_flower:'Bronze flower',any_mithril_flower:'Mithril flower',any_adamantine_flower:'Adamantine flower',any_bronze_beetle:'Bronze beetle',any_mithril_beetle:'Mithril beetle',any_adamantine_beetle:'Adamantine beetle'}; return m[t] || dn(t); }
+  function isValid(k) { return k && !BLOCKLIST.test(k) && !PFP_HASH.test(k); }
+  function isVisible(el) { return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)); }
+  function bodyText() { return (document.body && document.body.innerText) || ''; }
+  function currentCartridge() { var m = window.location.href.match(/[?&]cartridge=([^&#]+)/i); return m ? m[1].toLowerCase() : ''; }
+  function safeClick(el) { if (!el) return false; try { el.click(); return true; } catch(e) {} try { el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); return true; } catch(e2) {} return false; }
+  function firstVisible(sels) { for (var i = 0; i < sels.length; i++) { var nodes = document.querySelectorAll(sels[i]); for (var j = 0; j < nodes.length; j++) if (isVisible(nodes[j])) return nodes[j]; } return null; }
+  function findButton(sels) { var btn = firstVisible(sels); return (btn && !btn.disabled && !btn.classList.contains('disabled') && btn.getAttribute('aria-disabled') !== 'true') ? btn : null; }
+  function bestHammerTier() { return S.ownedHammers.length ? Math.max.apply(null, S.ownedHammers.map(function(h) { return HAMMER_TIERS.indexOf(h); })) : -1; }
+
+  /* ═══════════════════════════════════════════════════════
+     4. STATE MANAGEMENT
+     ═══════════════════════════════════════════════════════ */
+  function defaults() {
+    return { ver:VER, mergedInventory:{}, currentHammer:null, ownedHammers:[], brokenHammers:[], discoveredHammers:[],
+      currentHammerBonus:null, currentHammerBreakChance:null, timers:{}, lastFullScan:0, lastPassiveScan:0,
+      autoClaim:true, autoHunt:true, panelOpen:true, level:null, craftMode:null, strategy:'endgame',
+      log:[], machineState:'BOOTING', stateEnteredAt:Date.now(),
+      session:{claims:0, hunts:0, cheeseClaims:0, cheeseGained:0, gains:[], totalXP:0, startTime:Date.now()} };
+  }
+  function load() {
+    try {
+      var raw = GM_getValue(STORE_KEY, null);
+      if (!raw) return defaults();
+      var p = Object.assign(defaults(), JSON.parse(raw));
+      if ((p.ver||'0').split('.')[0] !== VER.split('.')[0]) { p.mergedInventory = {}; p.log = []; p.session = defaults().session; }
+      p.ver = VER; p.machineState = 'BOOTING'; p.stateEnteredAt = Date.now();
+      return p;
+    } catch(e) { return defaults(); }
+  }
+  function save() { try { GM_setValue(STORE_KEY, JSON.stringify(S)); } catch(e) {} }
+  var S = load();
+  function transition(state) { S.machineState = state; S.stateEnteredAt = Date.now(); save(); }
+  function stateAge() { return Date.now() - S.stateEnteredAt; }
+
+  var _throttled = {};
+  function logEvent(msg) { var ts = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); S.log.push(ts+' '+msg); if (S.log.length > 30) S.log = S.log.slice(-30); save(); var el = document.getElementById('bc8-log'); if (el) el.innerHTML = S.log.slice().reverse().map(function(l) { return '<div class="bc8-log-line">'+l+'</div>'; }).join(''); }
+  function logThrottled(key, msg, ms) { var now = Date.now(); if (now - (_throttled[key]||0) < (ms||LOG_THROTTLE)) return; _throttled[key] = now; logEvent(msg); }
+
+  /* ═══════════════════════════════════════════════════════
+     5. DOM PARSING
+     ═══════════════════════════════════════════════════════ */
+  function resolveItemKey(itemEl, imgEl) {
+    if (imgEl) {
+      var bg = (imgEl.style && imgEl.style.backgroundImage) || '';
+      if (!bg || bg === 'none') try { bg = getComputedStyle(imgEl).backgroundImage || ''; } catch(e) {}
+      var m = bg.match(/\/beetle\/images\/icons\/[^/]+\/([^."')]+)\.(png|jpg|webp|gif|svg)/i);
+      if (m && m[1]) return norm(m[1]);
+      var img = imgEl.querySelector('img') || (imgEl.tagName === 'IMG' ? imgEl : null);
+      if (img) { var src = img.getAttribute('src') || ''; var m2 = src.match(/\/beetle\/images\/icons\/[^/]+\/([^."'?#]+)\.(png|jpg|webp|gif|svg)/i); if (m2 && m2[1]) return norm(m2[1]); var m3 = src.match(/\/([^/."'?#]+)\.(png|jpg|webp|gif|svg)/i); if (m3 && m3[1]) return norm(m3[1]); }
     }
-    var byOutput = RECIPES.filter(function(r) { return RECIPE_OUTPUT[r.label] === goal.key; });
-    if (byOutput.length) { return byOutput; }
-    if (!goal.recipe) { return []; }
-    return RECIPES.filter(function(r) { return r.label === goal.recipe; });
+    var cands = imgEl ? [imgEl, itemEl] : [itemEl];
+    for (var i = 0; i < cands.length; i++) { var el = cands[i]; if (!el) continue; var txt = el.getAttribute('alt') || el.getAttribute('title') || el.getAttribute('aria-label') || ''; if (txt) return norm(txt); }
+    return null;
+  }
+  function scanPage(sel, imgCls, cntCls) {
+    var r = {}, unresolved = 0;
+    document.querySelectorAll(sel).forEach(function(item) { var imgEl = item.querySelector(imgCls); var k = resolveItemKey(item, imgEl); if (!k || !isValid(k)) { unresolved++; return; } var el = item.querySelector(cntCls); r[k] = Math.max(r[k]||0, el ? (parseInt(el.textContent.trim(),10)||1) : 1); });
+    return {items:r, unresolved:unresolved};
+  }
+  function fingerprint(items) { return Object.keys(items).sort().map(function(k) { return k+':'+items[k]; }).join(','); }
+
+  var _scanning = false;
+  async function fullScan() {
+    if (_scanning) return;
+    _scanning = true; var totalUnresolved = 0, oldInv = Object.assign({}, S.mergedInventory);
+    try {
+      var merged = {};
+      var merge = function(r) { for (var k in r.items) merged[k] = Math.max(merged[k]||0, r.items[k]); totalUnresolved += r.unresolved; };
+      var seenFP = {};
+      merge(scanPage('.crafting-module__inventory-grid .crafting-module__beetle-item','.crafting-module__beetle-img','.crafting-module__beetle-item-count'));
+      for (var i = 0; i < 20; i++) { var more = document.querySelector('.crafting-module__pagination-button'); if (!more || more.disabled || more.classList.contains('disabled')) break; more.click(); await new Promise(function(r){setTimeout(r,200);}); var page = scanPage('.crafting-module__inventory-grid .crafting-module__beetle-item','.crafting-module__beetle-img','.crafting-module__beetle-item-count'); var fp = fingerprint(page.items); if (seenFP[fp]) break; seenFP[fp] = true; merge(page); }
+      var seenFP2 = {};
+      merge(scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'));
+      for (var j = 0; j < 20; j++) { var more2 = document.querySelector('.beetle-catch-module__pagination-button'); if (!more2 || more2.disabled || more2.classList.contains('disabled')) break; more2.click(); await new Promise(function(r){setTimeout(r,200);}); var page2 = scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count'); var fp2 = fingerprint(page2.items); if (seenFP2[fp2]) break; seenFP2[fp2] = true; merge(page2); }
+      if (Object.keys(merged).length > 0) {
+        S.mergedInventory = merged;
+        var changes = [];
+        for (var k in merged) { var old = oldInv[k]||0; if (merged[k] > old && !JUNK_SET.has(k) && k !== 'cheese') { changes.push(dn(k)+' +'+(merged[k]-old)); if (ALL_BEETLES.indexOf(k) > -1 && k !== 'green') for (var bi = 0; bi < merged[k]-old; bi++) S.session.gains.push(dn(k)); } }
+        var jd = cnt(merged,ANY_JUNK) - cnt(oldInv,ANY_JUNK); if (jd > 0) changes.push('Junk +'+jd);
+        var cd = (merged.cheese||0) - (oldInv.cheese||0); if (cd !== 0) changes.push('Cheese '+(cd>0?'+':'')+cd);
+        logEvent('Scan: '+(changes.length ? changes.join(', ') : 'no changes')+(totalUnresolved ? ' ('+totalUnresolved+' unresolved)' : ''));
+        S.lastFullScan = Date.now(); S.lastPassiveScan = Date.now();
+      } else { logEvent('Scan: no items found'); }
+    } finally { _scanning = false; }
+    parseTimers(); parseHammer(); parseLevel(); parseCraftMode(); save(); renderPanel();
   }
 
-  // Score all progression goals and return the best actionable one
+  function passiveScan() {
+    if (_scanning || document.hidden) return;
+    if (!document.querySelector('.crafting-module__beetle-item, .beetle-catch-module__beetle-item')) return;
+    var vis = {}, updated = false;
+    var r1 = scanPage('.crafting-module__inventory-grid .crafting-module__beetle-item','.crafting-module__beetle-img','.crafting-module__beetle-item-count');
+    var r2 = scanPage('.beetle-catch-module__beetle-item','.beetle-catch-module__beetle-img','.beetle-catch-module__beetle-item-count');
+    for (var k in r1.items) vis[k] = Math.max(vis[k]||0, r1.items[k]);
+    for (var k2 in r2.items) vis[k2] = Math.max(vis[k2]||0, r2.items[k2]);
+    if (!Object.keys(vis).length) return;
+    for (var k3 in vis) {
+      if (S.mergedInventory.hasOwnProperty(k3)) { if (vis[k3] !== S.mergedInventory[k3]) { S.mergedInventory[k3] = vis[k3]; updated = true; } }
+      else if (isValid(k3) && LABELS[k3]) { if (!S._pending) S._pending = {}; if (S._pending[k3]) { S.mergedInventory[k3] = vis[k3]; updated = true; delete S._pending[k3]; } else S._pending[k3] = Date.now(); }
+    }
+    if (S._pending) { var now = Date.now(); for (var pk in S._pending) if (now - S._pending[pk] > 300000) delete S._pending[pk]; }
+    S.lastPassiveScan = Date.now(); if (updated) save();
+    parseTimers(); parseHammer();
+  }
+
+  function parseTimers() {
+    var t = {beetleCatch:null, dailyCheese:null, huntCooldown:null};
+    var bc = document.querySelector('.beetle-game-nav .info span:last-child');
+    if (bc) { var v = bc.textContent.trim(); if (/\d/.test(v)) t.beetleCatch = v; }
+    if (!t.beetleCatch) { var nav = document.querySelector('.beetle-game-nav .info'); if (nav && /ready/i.test(nav.textContent)) t.beetleCatch = 'Ready!'; }
+    var dc = document.querySelector('.cheese-claim-nav .info span:last-child');
+    if (dc) { var v2 = dc.textContent.trim(); if (/\d/.test(v2)) t.dailyCheese = v2; }
+    if (!t.dailyCheese) { var navC = document.querySelector('.cheese-claim-nav .info'); if (navC && /ready/i.test(navC.textContent)) t.dailyCheese = 'Ready!'; }
+    var cd = document.querySelector('.beetle-catch-module__cooldown-timer');
+    if (cd) { var v3 = cd.textContent.trim().replace(/\s*to\s+next\s+claim\s*/i,'').trim(); if (/\d/.test(v3)) t.beetleCatch = v3; }
+    var hc = document.querySelector('.beetle-catch-module__hunt-button-cheese-cost');
+    if (hc) { var txt = hc.textContent.trim(); if (/cooldown/i.test(txt)) { var cl = txt.replace(/\s*cooldown\s*/i,'').trim(); if (/\d/.test(cl)) t.huntCooldown = cl; } else if (/cheese/i.test(txt)) t.huntCooldown = 'Ready!'; }
+    S.timers = t;
+  }
+  function parseHammer() {
+    var owned = [], broken = [], discovered = [];
+    document.querySelectorAll('.crafting-module__hammer-row .crafting-module__hammer-slot').forEach(function(s) {
+      if (s.classList.contains('crafting-module__hammer-slot--undiscovered')) return;
+      var img = s.querySelector('.crafting-module__beetle-img'); if (!img) return;
+      var k = resolveItemKey(s, img);
+      if (k && k.indexOf('hammer_t') === 0) { discovered.push(k); if (s.classList.contains('crafting-module__hammer-slot--empty')) broken.push(k); else owned.push(k); }
+    });
+    function dedupe(a) { var s = {}; return a.filter(function(v) { return s[v] ? false : (s[v]=true); }); }
+    S.ownedHammers = dedupe(owned).sort(function(a,b) { return HAMMER_TIERS.indexOf(b) - HAMMER_TIERS.indexOf(a); });
+    S.brokenHammers = dedupe(broken); S.discoveredHammers = dedupe(discovered);
+    S.currentHammer = S.ownedHammers[0] || null;
+    var st = S.currentHammer ? HAMMER_STATS[S.currentHammer] : null;
+    S.currentHammerBonus = st ? st.bonus : null; S.currentHammerBreakChance = st ? st.baseBreak : null;
+  }
+  function parseLevel() { var el = document.querySelector('.beetle-card__level'); if (el) { var m = el.textContent.match(/(\d+)/); if (m) { var lv = parseInt(m[1],10); if (S.level && lv > S.level) logEvent('LEVEL UP! '+S.level+' -> '+lv); S.level = lv; } } }
+  function parseCraftMode() { var cm = document.querySelector('.crafting-module'); S.craftMode = cm ? (cm.classList.contains('crafting-module--smash') ? 'Smash' : 'Assemble') : null; }
+  function isFresh() { return Date.now() - (S.lastPassiveScan||0) < STALE_MS || Date.now() - (S.lastFullScan||0) < STALE_MS; }
+
+  /* ═══════════════════════════════════════════════════════
+     6. RECOMMENDATION ENGINE
+     ═══════════════════════════════════════════════════════ */
+  function canMake(r, inv) { var needed = {}; for (var i = 0; i < r.inputs.length; i++) { var t = r.inputs[i]; needed[t] = (needed[t]||0)+1; } for (var tok in needed) { var g = TOKEN_GROUPS[tok]; if (g ? cnt(inv,g) < needed[tok] : (inv[tok]||0) < needed[tok]) return false; } return true; }
+  function wouldConsumeLastCollectible(recipe, inv) {
+    if (S.strategy === 'flowers' && FLOWER_CONSUMING.has(recipe.label)) return false;
+    var out = RECIPE_OUTPUT[recipe.label]||null, makesNew = out && COLLECTIBLES.has(out) && !(inv[out]||0);
+    for (var i = 0; i < recipe.inputs.length; i++) {
+      var t = recipe.inputs[i], g = TOKEN_GROUPS[t];
+      if (g) { for (var gi = 0; gi < g.length; gi++) { if ((inv[g[gi]]||0) > 0 && COLLECTIBLES.has(g[gi]) && (inv[g[gi]]||0) <= 1) { var hasAlt = false; for (var ai = 0; ai < g.length; ai++) if (ai !== gi && (inv[g[ai]]||0) > 1) { hasAlt = true; break; } if (!hasAlt && !(makesNew && !isProtected(g[gi],inv,out))) return true; } } }
+      else if (COLLECTIBLES.has(t) && (inv[t]||0) <= 1 && !(makesNew && !isProtected(t,inv,out))) return true;
+      if (!g && isProtected(t,inv,out)) return true;
+    }
+    return false;
+  }
+  function isProtected(key, inv, forOut) {
+    var needsAda = !(inv['bombardier']||0) || !(inv['stag']||0) || !(inv['goliath']||0);
+    if (needsAda) { if (forOut === 'bombardier' || forOut === 'stag' || forOut === 'goliath') return false; if ((key === 'pond' || key === 'monarch') && (inv[key]||0) <= 2) return true; }
+    if (!(inv['black_lotus']||0)) { if (forOut === 'black_lotus') return false; if ((key === 'pinecone' || key === 'moss' || key === 'gunpowder') && (inv[key]||0) <= 1) return true; }
+    if (!(inv['sunset_moth']||0)) { if (forOut === 'sunset_moth') return false; if (key === 'gazania' && (inv[key]||0) <= 1) return true; }
+    if (!(inv['sabertooth_longhorn']||0)) { if (forOut === 'sabertooth_longhorn') return false; if (key === 'pincushion' && (inv[key]||0) <= 1) return true; }
+    if (!(inv['mars_rhino']||0)) { if (forOut === 'mars_rhino') return false; if ((key === 'black_lotus' || key === 'sunset_moth' || key === 'sabertooth_longhorn') && (inv[key]||0) <= 1) return true; }
+    if (!(inv['hercules']||0)) { if (forOut === 'hercules') return false; if ((key === 'golden_scarab' || key === 'pollen_adamantine') && (inv[key]||0) <= 1) return true; }
+    return false;
+  }
+  function getDirectCrafts(inv) {
+    var ht = bestHammerTier();
+    return RECIPES.filter(function(r) {
+      if (r.label === 'Junk Cube' || !canMake(r,inv)) return false;
+      var hk = HAMMER_RECIPE_KEY[r.label]; if (hk) { var isBroken = S.brokenHammers && S.brokenHammers.indexOf(hk) > -1; var ot = HAMMER_TIERS.indexOf(hk); if (!isBroken && (ot<=ht||ot>ht+1)) return false; }
+      var out = RECIPE_OUTPUT[r.label]; if (out && COLLECTIBLES.has(out) && (inv[out]||0) > 0 && !NEEDED_AS_INGREDIENT.has(out)) return false;
+      return !wouldConsumeLastCollectible(r,inv);
+    }).sort(function(a,b) { return (RECIPE_VALUE[b.label]||5) - (RECIPE_VALUE[a.label]||5); });
+  }
+  function getStage(inv) { var c = 0; for (var i = 0; i < STAGES.length; i++) { if (STAGES[i].check.every(function(k) { return (inv[k]||0) > 0; })) c = STAGES[i].n; else break; } return c; }
+  function getCollection(inv) { return { ownedB:ALL_BEETLES.filter(function(k){return (inv[k]||0)>0;}), ownedF:ALL_FLOWERS.filter(function(k){return (inv[k]||0)>0;}), missingB:ALL_BEETLES.filter(function(k){return !(inv[k]||0);}), missingF:ALL_FLOWERS.filter(function(k){return !(inv[k]||0);}), totalB:ALL_BEETLES.length, totalF:ALL_FLOWERS.length }; }
   function getProgressionMove(inv) {
     var chain = S.strategy === 'flowers' ? FLOWER_CHAIN : (S.strategy === 'broad' ? BROAD_CHAIN : ENDGAME_CHAIN);
-    var candidates = []; // {score, type, goal, label, reason, ...}
-    var bestBlocked = null;
-
-    for (var ci = 0; ci < chain.length; ci++) {
-      var goal = chain[ci];
-      var minQty = goal.minQty || 1; // For flowers/pollens, might need more than 1
-      if ((inv[goal.key]||0) >= minQty) { continue; }
-
-      var missingPrereqs = [];
-      for (var pi = 0; pi < goal.prereqs.length; pi++) {
-        if (tokenCount(inv, goal.prereqs[pi]) < 1) { missingPrereqs.push(goal.prereqs[pi]); }
-      }
-
-      var goalValue = RECIPE_VALUE[goal.recipe] || 30;
-
-      // Can craft directly?
-      if (missingPrereqs.length === 0 && goal.recipe) {
-        var directRecipe = getGoalRecipes(goal).find(function(r) {
-          return canMake(r, inv) && !wouldConsumeLastCollectible(r, inv);
-        });
-        if (directRecipe && canMake(directRecipe, inv) && !wouldConsumeLastCollectible(directRecipe, inv)) {
-          // Direct craft: highest priority (score = value + 100)
-          candidates.push({score: goalValue + 100, type:'direct', goal:goal.key, label:directRecipe.label, reason:'Craft ' + dn(goal.key)});
-          continue;
-        }
-      }
-
-      // Can craft a prereq?
-      var foundPrereq = false;
-      for (var mi = 0; mi < missingPrereqs.length; mi++) {
-        var prereqLabels = PREREQ_RECIPES[missingPrereqs[mi]];
-        if (!prereqLabels) { continue; }
-        for (var pri = 0; pri < prereqLabels.length; pri++) {
-          var prereqRecipe = RECIPES.find(function(r) { return r.label === prereqLabels[pri]; });
-          if (prereqRecipe && canMake(prereqRecipe, inv) && !wouldConsumeLastCollectible(prereqRecipe, inv)) {
-            // Prereq craft: score = goal value + proximity bonus (fewer missing = closer)
-            var proximity = goal.prereqs.length - missingPrereqs.length;
-            candidates.push({
-              score: goalValue + (proximity * 10),
-              type:'prereq', goal:goal.key, label:prereqLabels[pri],
-              reason:'For ' + dn(goal.key) + ': craft ' + prereqLabels[pri],
-              target:dn(goal.key), produces:missingPrereqs[mi]
-            });
-            foundPrereq = true;
-            break; // One prereq per goal is enough
-          }
-        }
-        if (foundPrereq) { break; }
-      }
-
-      // Blocked — remember the highest-value blocked goal
-      if (!foundPrereq && !bestBlocked) {
-        bestBlocked = {type:'blocked', goal:goal.key, label:goal.recipe,
-          reason:missingPrereqs.length ? ('Need: ' + missingPrereqs.map(tokHuman).join(', ')) : (goal.via || 'Need recipe inputs'),
-          via:goal.via};
-      }
+    var bestD = null, bestP = null, bestB = null;
+    for (var i = 0; i < chain.length; i++) {
+      var g = chain[i]; if ((inv[g.key]||0) >= (g.minQty||1)) continue;
+      var miss = g.prereqs.filter(function(p) { return tokenCount(inv,p) < 1; });
+      var val = RECIPE_VALUE[g.recipe] || 30;
+      if (miss.length === 0 && g.recipe) { var recs = RECIPES.filter(function(r) { return RECIPE_OUTPUT[r.label] === g.key || r.label === g.recipe; }); var d = recs.find(function(r) { return canMake(r,inv) && !wouldConsumeLastCollectible(r,inv); }); if (d && (!bestD || val > bestD.val)) { bestD = {val:val,type:'direct',goal:g.key,label:d.label}; } continue; }
+      if (!bestP) { for (var mi = 0; mi < miss.length; mi++) { var pls = PREREQ_RECIPES[miss[mi]]; if (!pls) continue; for (var pi = 0; pi < pls.length; pi++) { var pr = RECIPES.find(function(r){return r.label===pls[pi];}); if (pr && canMake(pr,inv) && !wouldConsumeLastCollectible(pr,inv)) { bestP = {val:val,type:'prereq',goal:g.key,label:pls[pi],reason:'For '+dn(g.key)+': craft '+pls[pi]}; break; } } if (bestP) break; } }
+      if (!bestB) bestB = {type:'blocked',goal:g.key,label:g.recipe,reason:miss.length?'Need: '+miss.map(tokHuman).join(', '):(g.via||'Need inputs'),via:g.via};
     }
-
-    // Return best candidate by score, or blocked if nothing is actionable
-    if (candidates.length > 0) {
-      candidates.sort(function(a,b) { return b.score - a.score; });
-      return candidates[0];
-    }
-    return bestBlocked;
+    return bestD || bestP || bestB;
   }
 
-  function isGuaranteedOutput(label, token) {
-    if (!token) { return false; }
-    return RECIPE_OUTPUT[label] === token;
+  /* ═══════════════════════════════════════════════════════
+     7. ACTIONS
+     ═══════════════════════════════════════════════════════ */
+  var _navBlockedUntil = 0, _bootTime = Date.now();
+  function authBlockReason() { var t = bodyText(); if (/oidc-spa:\s*for security reasons/i.test(t) || /auth response/i.test(t)) return 'auth'; if (/sign in\s*or\s*register/i.test(t)) return 'signed-out'; if (/\bsign in\b/i.test(t) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) return 'signed-out'; return null; }
+  function gameReady() { return !authBlockReason() && !(document.visibilityState && document.visibilityState !== 'visible') && !!document.querySelector('#root, #app, .navbar-content, header, nav'); }
+  function navReady() { return gameReady() && !(_navBlockedUntil && Date.now() < _navBlockedUntil) && Date.now() - _bootTime >= BOOT_GRACE && !!document.querySelector('.navbar-content, .search-input, .beetle-game-nav, .cheese-claim-nav'); }
+
+  function ensureCartridge(cart, reason) {
+    cart = (cart||'').toLowerCase(); if (currentCartridge() === cart) return true; if (!navReady()) return false;
+    var target = cart === 'beetle' ? firstVisible(['.beetle-game-nav','a[href*="cartridge=beetle"]']) : cart === 'cheese' ? firstVisible(['.cheese-claim-nav','a[href*="cartridge=cheese"]']) : null;
+    _navBlockedUntil = Date.now() + NAV_COOLDOWN;
+    if (target && safeClick(target)) { logEvent('Switching to '+cart+' for '+reason); return false; }
+    logEvent('Navigating to '+cart+' for '+reason); window.location.assign('https://www.remilia.net/home?cartridge='+cart); return false;
   }
-
-  function getActionPlans(inv) {
-    if (isStale()) { return []; }
-    var plans = [];
-    var directCrafts = getDirectCrafts(inv);
-
-    // Phase 0: Goal-directed progression move (highest priority)
-    var progMove = getProgressionMove(inv);
-    if (progMove && (progMove.type === 'direct' || progMove.type === 'prereq')) {
-      var progRecipe = RECIPES.find(function(r){return r.label === progMove.label;});
-      if (progRecipe) {
-        var progValue = (RECIPE_VALUE[progMove.label]||5) + 20; // Boost progression moves
-        if (progMove.type === 'prereq' && progMove.target) {
-          var prereqGuaranteed = isGuaranteedOutput(progMove.label, progMove.produces);
-          // 2-step plan: prereq then goal
-          plans.push({
-            goal: dn(progMove.goal), value: progValue, type: '2-step', progression: true,
-            steps: [
-              { label: progMove.label, inputs: progRecipe.inputs.map(tokHuman).join(' + '), ready: true, note: progRecipe.type === 'smash' ? 'RNG' : null, produces: progMove.produces, guaranteed: prereqGuaranteed },
-              { label: progMove.target, inputs: progMove.reason, ready: false }
-            ]
-          });
-        } else {
-          plans.push({
-            goal: dn(progMove.goal), value: progValue, type: 'direct', progression: true,
-            steps: [{ label: progMove.label, inputs: progRecipe.inputs.map(tokHuman).join(' + '), ready: true }]
-          });
-        }
-      }
-    }
-
-    // Phase 1: Direct crafts with strategy-aware boosting
-    var FLOWER_BOOST = {'Bronze Pollen':30,'Mithril Pollen':30,'Adamantine Pollen':30,
-      'Tin Pollen':15,'Bronze Flower Transmute':25,'Mithril Flower Transmute':35,'Adamantine Flower Transmute':45,
-      'Nectar / Cattail Bridge':20,'Pinecone / Moss / Gunpowder Bridge':25};
-    var ENDGAME_BOOST = {'Pinecone / Moss / Gunpowder Bridge':20,'Black Lotus':15};
-    for (var di = 0; di < directCrafts.length; di++) {
-      var r = directCrafts[di];
-      var value = RECIPE_VALUE[r.label] || 5;
-      // Apply strategy boost
-      if (S.strategy === 'flowers' && FLOWER_BOOST[r.label]) { value += FLOWER_BOOST[r.label]; }
-      if (S.strategy === 'endgame' && ENDGAME_BOOST[r.label]) { value += ENDGAME_BOOST[r.label]; }
-      var fragile = r.inputs.some(function(t) {
-        var group = TOKEN_GROUPS[t];
-        if (group) { return cnt(inv, group) <= 1; }
-        return (inv[t]||0) <= 1;
-      });
-      plans.push({
-        goal: r.label, value: value, type: 'direct', fragile: fragile,
-        steps: [{ label: r.label, inputs: r.inputs.map(tokHuman).join(' + '), ready: true }]
-      });
-    }
-
-    // Phase 2: 2-step chains
-    var ht = S.ownedHammers.length ? Math.max.apply(null, S.ownedHammers.map(function(h) { return HAMMER_TIERS.indexOf(h); })) : -1;
-    var PREREQ_MAP = {
-      'pollen_tin':['Tin Pollen'],'pollen_bronze':['Bronze Pollen'],
-      'pollen_mithril':['Mithril Pollen'],'pollen_adamantine':['Adamantine Pollen'],
-      'cattail':['Nectar / Cattail Bridge'],'nectar':['Nectar / Cattail Bridge'],
-      'pinecone':['Pinecone / Moss / Gunpowder Bridge'],'moss':['Pinecone / Moss / Gunpowder Bridge'],
-      'gunpowder':['Pinecone / Moss / Gunpowder Bridge'],
-      'junk_cube_t1':['Junk Cube'],'junk_cube_t2':['Junk Tesseract']
-    };
-    for (var ri = 0; ri < RECIPES.length; ri++) {
-      var recipe = RECIPES[ri];
-      if (recipe.label === 'Junk Cube') { continue; }
-      var hk = {'Tin Hammer':'hammer_t1','Bronze Hammer':'hammer_t2','Mithril Hammer':'hammer_t3',
-        'Adamantine Hammer':'hammer_t4','Diamond Hammer':'hammer_t5'}[recipe.label];
-      if (hk) {
-        var isBroken2 = S.brokenHammers && S.brokenHammers.indexOf(hk) > -1;
-        var ot = HAMMER_TIERS.indexOf(hk);
-        if (!isBroken2 && (ot<=ht||ot>ht+1)) { continue; }
-      }
-      // Skip already-owned outputs (same filter as getDirectCrafts)
-      var outputKey2 = RECIPE_OUTPUT[recipe.label];
-      if (outputKey2 && COLLECTIBLES.has(outputKey2) && (inv[outputKey2]||0) > 0) {
-        if (!NEEDED_AS_INGREDIENT.has(outputKey2)) { continue; }
-      }
-      if (canMake(recipe, inv)) { continue; }
-      var needed = {};
-      for (var ni = 0; ni < recipe.inputs.length; ni++) { needed[recipe.inputs[ni]] = (needed[recipe.inputs[ni]]||0) + 1; }
-      var missing = [];
-      for (var token in needed) {
-        var group = TOKEN_GROUPS[token];
-        var have = group ? cnt(inv, group) : (inv[token]||0);
-        if (have < needed[token]) { missing.push(token); }
-      }
-      if (missing.length !== 1) { continue; }
-      var missingToken = missing[0];
-      var prereqLabels = PREREQ_MAP[missingToken];
-      if (!prereqLabels) { continue; }
-      for (var pi = 0; pi < prereqLabels.length; pi++) {
-        var prereq = RECIPES.find(function(x) { return x.label === prereqLabels[pi]; });
-        if (!prereq || !canMake(prereq, inv)) { continue; }
-        if (wouldConsumeLastCollectible(prereq, inv)) { continue; }
-        var vInv = consumeInputs(inv, prereq);
-        var prereqGuaranteed2 = isGuaranteedOutput(prereq.label, missingToken);
-        if (prereqGuaranteed2) {
-          vInv[missingToken] = (vInv[missingToken]||0) + 1;
-        }
-        if (canMake(recipe, vInv) && !wouldConsumeLastCollectible(recipe, vInv)) {
-          plans.push({
-            goal: recipe.label, value: (RECIPE_VALUE[recipe.label]||5) - 5, type: '2-step',
-            steps: [
-              { label: prereq.label, inputs: prereq.inputs.map(tokHuman).join(' + '), ready: true, note: prereq.type === 'smash' ? 'RNG' : null, produces: missingToken, guaranteed: prereqGuaranteed2 },
-              { label: recipe.label, inputs: recipe.inputs.map(tokHuman).join(' + '), ready: false }
-            ]
-          });
-        }
-      }
-    }
-
-    // Deduplicate
-    var seen = {};
-    var unique = [];
-    plans.sort(function(a,b) { return b.value - a.value; });
-    for (var ui = 0; ui < plans.length; ui++) {
-      var base = plans[ui].goal.replace(/ \(alt\)$| \(Stag\)$| \(Bomb\)$/,'');
-      if (!seen[base]) { seen[base] = true; unique.push(plans[ui]); }
-    }
-
-    // Cross-plan consumption check (credits recipe outputs for multi-step plans)
-    var finalPlans = [];
-    var sharedInv = Object.assign({}, inv);
-    for (var fi = 0; fi < unique.length; fi++) {
-      var plan = unique[fi];
-      var ok = true;
-      var testInv = Object.assign({}, sharedInv);
-      for (var si = 0; si < plan.steps.length; si++) {
-        var sr = RECIPES.find(function(x) { return x.label === plan.steps[si].label; });
-        if (!sr || !canMake(sr, testInv)) { ok = false; break; }
-        testInv = consumeInputs(testInv, sr);
-        // Credit the exact output this prereq step was chosen to produce
-        if (plan.steps[si].produces && plan.steps[si].guaranteed) {
-          testInv[plan.steps[si].produces] = (testInv[plan.steps[si].produces]||0) + 1;
-        }
-      }
-      if (ok) {
-        finalPlans.push(plan);
-        // Deduct from shared inventory
-        for (var ci = 0; ci < plan.steps.length; ci++) {
-          var cr = RECIPES.find(function(x) { return x.label === plan.steps[ci].label; });
-          if (cr) { sharedInv = consumeInputs(sharedInv, cr); }
-        }
-      }
-      if (finalPlans.length >= 3) { break; }
-    }
-    return finalPlans;
+  function ensureCatchView() {
+    if (firstVisible(['.beetle-catch-module__catch-button','.beetle-catch-module__hunt-button','.beetle-catch-module'])) return true;
+    var nav = firstVisible(['.beetle-game-nav']); if (nav && gameReady()) { safeClick(nav); return false; } return false;
   }
-
-  /* ─── FIX 4: Auto-Claim / Hunt / Cheese with explicit logging ─── */
-  var _lastClaimTime = 0, _lastHuntTime = 0, _lastCheeseTime = 0;
-  // After claim/hunt/cheese: wait for game to process, then re-parse state and full scan
-  var _pendingFullScan = null;
-  function postActionRefresh(reason, delay) {
-    setTimeout(function() {
-      logEvent(reason + ' — refreshing...');
-      parseTimers();
-      parseHammer();
-      passiveScan();
-      renderPanel();
-      // Coalesce: clear any pending full scan, schedule one new one
-      if (_pendingFullScan) { clearTimeout(_pendingFullScan); }
-      _pendingFullScan = setTimeout(function() {
-        _pendingFullScan = null;
-        if (!_scanning) { fullScan(); }
-      }, 8000); // 8s delayed full scan for authoritative truth
-    }, delay);
+  function executeAction(cfg) {
+    if (cfg.guards && !cfg.guards()) return false;
+    if (cfg.cartridge && !ensureCartridge(cfg.cartridge, cfg.name)) return 'navigating';
+    if (cfg.needCatchView && !ensureCatchView()) return 'navigating';
+    var btn = findButton(cfg.selectors); if (!btn) return 'waiting';
+    var text = (btn.textContent||'').replace(/\s+/g,' ').trim();
+    if (/processing|loading/i.test(text)) return 'stuck';
+    if (cfg.textBlock && cfg.textBlock.test(text)) return 'blocked';
+    if (!safeClick(btn)) return 'failed'; cfg.onSuccess(); return 'fired';
   }
+  var ACTIONS = {
+    claim: { name:'claim', cartridge:'beetle', needCatchView:true, selectors:['.beetle-catch-module__catch-button'],
+      guards:function() { if (!S.autoClaim) return false; var nav = document.querySelector('.beetle-game-nav .info'); return nav && /ready/i.test(nav.textContent); },
+      onSuccess:function() { S.session.claims++; logEvent('Auto-claimed beetle!'); save(); } },
+    hunt: { name:'hunt', cartridge:'beetle', needCatchView:true, selectors:['.beetle-catch-module__hunt-button'], textBlock:/cooldown/i,
+      guards:function() { if (!S.autoHunt) return false; var ch = S.mergedInventory.cheese||0; if (ch === 0) { var m = bodyText().match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i); if (m) ch = parseInt(m[1].replace(/,/g,''),10); } if (ch < HUNT_COST || ch - HUNT_COST < MIN_CHEESE) return false; var ce = firstVisible(['.beetle-catch-module__hunt-button-cheese-cost']); return !(ce && /cooldown/i.test(ce.textContent||'')); },
+      onSuccess:function() { S.session.hunts++; logEvent('Auto-hunted (-'+HUNT_COST+' cheese)'); save(); } },
+    cheese: { name:'daily cheese', cartridge:'cheese', selectors:['.claim-button'],
+      guards:function() { var nav = document.querySelector('.cheese-claim-nav .info'); return nav && /ready/i.test(nav.textContent); },
+      onSuccess:function() { S.session.cheeseClaims++; logEvent('Auto-claimed daily cheese!'); save(); } }
+  };
 
-  // Conservative cartridge navigation - avoids auth/session collisions
-  var _navigating = false;
-  var _navStartedAt = 0;
-  var _navBlockedUntil = 0;
-  var _bootTime = Date.now();
-  var _throttledLogs = {};
-
-  function logThrottled(key, msg, windowMs) {
-    var now = Date.now();
-    var last = _throttledLogs[key] || 0;
-    if (now - last < (windowMs || LOG_THROTTLE_MS)) { return; }
-    _throttledLogs[key] = now;
-    logEvent(msg);
-  }
-
-  function isVisible(el) {
-    return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-  }
-
-  function bodyText() {
-    return (document.body && document.body.innerText) ? document.body.innerText : '';
-  }
-
-  function currentCartridge() {
-    var m = window.location.href.match(/[?&]cartridge=([^&#]+)/i);
-    return m ? m[1].toLowerCase() : '';
-  }
-
-  function authBlockReason() {
-    var text = bodyText();
-    if (/oidc-spa:\s*for security reasons/i.test(text) || /auth response/i.test(text)) {
-      return 'auth restoration in progress';
-    }
-    if (/sign in\s*or\s*register/i.test(text)) { return 'sign-in required'; }
-    if (/\bsign in\b/i.test(text) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) {
-      return 'sign-in required';
-    }
-    return null;
-  }
-
-  function automationReadiness() {
-    var authReason = authBlockReason();
-    if (authReason) { return {ok:false, reason:authReason, cooloff:true}; }
-    if (document.visibilityState && document.visibilityState !== 'visible') { return {ok:false, reason:'tab hidden'}; }
-    if (!document.querySelector('#root, #app, .navbar-content, header, nav')) {
-      return {ok:false, reason:'app shell loading'};
-    }
-    return {ok:true};
-  }
-
-  function navigationReadiness() {
-    var base = automationReadiness();
-    if (!base.ok) { return base; }
-    if (_navBlockedUntil && Date.now() < _navBlockedUntil) {
-      return {ok:false, reason:'navigation cooldown'};
-    }
-    if (Date.now() - _bootTime < BOOT_NAV_DELAY) {
-      return {ok:false, reason:'boot grace period'};
-    }
-    if (!document.querySelector('.navbar-content, .search-input, input[type="search"], .beetle-game-nav, .cheese-claim-nav')) {
-      return {ok:false, reason:'game nav loading'};
-    }
-    return {ok:true};
-  }
-
-  function holdNavigation(reason, ms) {
-    _navigating = false;
-    _navStartedAt = 0;
-    _navBlockedUntil = Math.max(_navBlockedUntil, Date.now() + (ms || NAV_RETRY_COOLDOWN));
-    logThrottled('nav-pause:' + reason, 'Automation paused: ' + reason + '.', LOG_THROTTLE_MS);
-  }
-
-  function clearStaleNavigation() {
-    if (_navigating && _navStartedAt && Date.now() - _navStartedAt > 10000) {
-      _navigating = false;
-      _navStartedAt = 0;
-    }
-    if (_navBlockedUntil && Date.now() >= _navBlockedUntil) {
-      _navBlockedUntil = 0;
-    }
-  }
-
-  function clickElement(el) {
-    if (!el) { return false; }
-    try { el.click(); return true; } catch (e) {}
-    try {
-      return el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
-    } catch (e2) {}
-    return false;
-  }
-
-  function firstVisible(selectors) {
-    for (var si = 0; si < selectors.length; si++) {
-      var nodes = document.querySelectorAll(selectors[si]);
-      for (var ni = 0; ni < nodes.length; ni++) {
-        if (isVisible(nodes[ni])) { return nodes[ni]; }
-      }
-    }
-    return null;
-  }
-
-  function findCartridgeTarget(cartridge) {
-    if (cartridge === 'beetle') {
-      return firstVisible([
-        '.beetle-game-nav',
-        'a[href*="cartridge=beetle"]',
-        '[data-cartridge="beetle"]'
-      ]);
-    }
-    if (cartridge === 'cheese') {
-      return firstVisible([
-        '.cheese-claim-nav',
-        'a[href*="cartridge=cheese"]',
-        '[data-cartridge="cheese"]'
-      ]);
-    }
-    return null;
-  }
-
-  function ensureCartridge(cartridge, reason) {
-    clearStaleNavigation();
-    cartridge = (cartridge || '').toLowerCase();
-    var alreadyThere = currentCartridge() === cartridge;
-    var readiness = alreadyThere ? automationReadiness() : navigationReadiness();
-    if (!readiness.ok) {
-      if (readiness.cooloff) { holdNavigation(readiness.reason); }
-      else { logThrottled('nav-skip:' + cartridge + ':' + readiness.reason, 'Navigation skipped for ' + reason + ': ' + readiness.reason + '.', LOG_THROTTLE_MS); }
-      return false;
-    }
-    if (alreadyThere) {
-      _navigating = false;
-      _navStartedAt = 0;
-      return true;
-    }
-    if (_navigating) { return false; }
-
-    var target = findCartridgeTarget(cartridge);
-    _navigating = true;
-    _navStartedAt = Date.now();
-    if (target && clickElement(target)) {
-      logEvent('Switching to ' + cartridge + ' for ' + reason + '...');
-      save();
-      return false;
-    }
-
-    logEvent('Navigating to ' + cartridge + ' for ' + reason + '...');
-    save();
-    window.location.assign('https://www.remilia.net/home?cartridge=' + cartridge);
-    return false;
-  }
-
-  function preferCatchView(reason) {
-    var catchBtn = firstVisible(['.beetle-catch-module__catch-button']);
-    var huntBtn = firstVisible(['.beetle-catch-module__hunt-button']);
-    var catchModule = firstVisible(['.beetle-catch-module']);
-    if (catchBtn || huntBtn || catchModule) { return false; }
-    var nav = firstVisible(['.beetle-game-nav']);
-    if (!nav) { return false; }
-    var readiness = automationReadiness();
-    if (!readiness.ok) {
-      if (readiness.cooloff) { holdNavigation(readiness.reason); }
-      else { logThrottled('catch-skip:' + readiness.reason, 'Catch view skipped: ' + readiness.reason + '.', LOG_THROTTLE_MS); }
-      return false;
-    }
-    logThrottled('catch-switch:' + reason, 'Switching to Beetle Catch for ' + reason + '...', 5000);
-    clickElement(nav);
-    return true;
-  }
-
-  function ensureBeetleActionSurface(reason) {
-    if (!ensureCartridge('beetle', reason)) { return false; }
-    if (preferCatchView(reason)) { return false; }
-    return true;
-  }
-
-  /* ─── Auto-Login: 3-screen OIDC auth flow ─── */
-  var _lastLoginAttempt = 0;
-  var _loginAttempts = 0;
-  var LOGIN_COOLDOWN = 15000;   // 15s between attempts per screen
-  var LOGIN_MAX_ATTEMPTS = 10;  // Give up after this many total attempts
-
+  /* ═══════════════════════════════════════════════════════
+     8. LOGIN FLOW
+     ═══════════════════════════════════════════════════════ */
+  var _loginAttempts = 0, _lastLoginTime = 0;
   function detectLoginScreen() {
-    var url = window.location.href;
-    var body = bodyText();
-
-    // Screen 3: OIDC login form with email/password fields and "Sign In" button
+    var url = window.location.href, body = bodyText();
     if (/\/oidc\/.*openid-connect/i.test(url)) {
-      var emailInput = document.querySelector('input[name="username"], input[type="email"], input[name="email"]');
-      var passInput = document.querySelector('input[name="password"], input[type="password"]');
-      var signInBtn = document.querySelector('input[type="submit"], button[type="submit"]');
-      if (!signInBtn) {
-        // Look for a button with "Sign In" text
-        var btns = document.querySelectorAll('button, input[type="button"], a');
-        for (var i = 0; i < btns.length; i++) {
-          if (/^\s*sign\s*in\s*$/i.test(btns[i].textContent.trim())) { signInBtn = btns[i]; break; }
-        }
-      }
-      if (emailInput && passInput && signInBtn) {
-        // Credentials pre-populated — just click Sign In
-        if (emailInput.value && passInput.value) { return {screen:3, action:signInBtn, desc:'Sign In (credentials pre-filled)'}; }
-        return {screen:3, action:null, desc:'Login form present but credentials not pre-filled'};
-      }
-      // Screen 2: Auth portal with "SIGN IN" / "NEW ACCOUNT" buttons (no form inputs)
-      if (/AUTHENTICATION\s*PORTAL/i.test(body) || /REMILIA.*SIGN\s*IN/i.test(body)) {
-        var portalBtns = document.querySelectorAll('button, a, div[role="button"]');
-        for (var j = 0; j < portalBtns.length; j++) {
-          var txt = portalBtns[j].textContent.trim();
-          if (/^\s*SIGN\s*IN\s*$/i.test(txt) && !/NEW/i.test(txt)) { return {screen:2, action:portalBtns[j], desc:'Auth Portal SIGN IN'}; }
-        }
-      }
-      return {screen:0, action:null, desc:'OIDC page but no actionable elements'};
+      var email = document.querySelector('input[name="username"], input[type="email"], input[name="email"]');
+      var pass = document.querySelector('input[name="password"], input[type="password"]');
+      var submit = document.querySelector('input[type="submit"], button[type="submit"]');
+      if (!submit) { var btns = document.querySelectorAll('button, input[type="button"], a'); for (var i = 0; i < btns.length; i++) if (/^\s*sign\s*in\s*$/i.test(btns[i].textContent.trim())) { submit = btns[i]; break; } }
+      if (email && pass && submit) { if (email.value && pass.value) return {screen:3,el:submit,desc:'Sign In (creds pre-filled)'}; return {screen:3,el:null,desc:'Creds not pre-filled'}; }
+      if (/AUTHENTICATION\s*PORTAL/i.test(body)) { var pb = document.querySelectorAll('button, a, div[role="button"]'); for (var j = 0; j < pb.length; j++) if (/^\s*SIGN\s*IN\s*$/i.test(pb[j].textContent.trim()) && !/NEW/i.test(pb[j].textContent)) return {screen:2,el:pb[j],desc:'Auth Portal SIGN IN'}; }
+      return {screen:0,el:null,desc:'OIDC page, nothing actionable'};
     }
-
-    // Screen 1: Main site showing "SIGN IN or register" (logged out)
     if (/sign\s*in\s*(or\s*register)?/i.test(body) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) {
-      var signInEl = null;
-      document.querySelectorAll('*').forEach(function(el) {
-        if (!signInEl && /^\s*SIGN\s*IN\s*$/i.test(el.textContent.trim()) && el.children.length <= 1) { signInEl = el; }
-      });
-      if (!signInEl) {
-        // Try the top-right area specifically
-        var links = document.querySelectorAll('a, button, div[role="button"]');
-        for (var k = 0; k < links.length; k++) {
-          if (/SIGN\s*IN/i.test(links[k].textContent) && links[k].closest('.navbar-content, header, nav, [class*="nav"]')) {
-            signInEl = links[k]; break;
-          }
-        }
-      }
-      if (signInEl) { return {screen:1, action:signInEl, desc:'Main site SIGN IN'}; }
+      var si = null;
+      document.querySelectorAll('a, button, div[role="button"]').forEach(function(el) { if (!si && /SIGN\s*IN/i.test(el.textContent) && el.closest('.navbar-content, header, nav, [class*="nav"]')) si = el; });
+      if (!si) document.querySelectorAll('*').forEach(function(el) { if (!si && /^\s*SIGN\s*IN\s*$/i.test(el.textContent.trim()) && el.children.length <= 1) si = el; });
+      if (si) return {screen:1,el:si,desc:'Main site SIGN IN'};
     }
-
-    return {screen:0, action:null, desc:'Not a login screen'};
+    return {screen:0,el:null,desc:'Not a login screen'};
   }
-
   function tryAutoLogin() {
-    if (Date.now() - _lastLoginAttempt < LOGIN_COOLDOWN) { return false; }
-    if (_loginAttempts >= LOGIN_MAX_ATTEMPTS) {
-      logThrottled('login-maxed', 'Auto-login gave up after ' + LOGIN_MAX_ATTEMPTS + ' attempts. Manual login required.', 120000);
-      return false;
-    }
-
-    var screen = detectLoginScreen();
-    if (screen.screen === 0 || !screen.action) {
-      if (screen.screen === 3 && !screen.action) {
-        logThrottled('login-nocreds', 'Login form found but credentials not pre-filled. Manual login required.', 60000);
-      }
-      return false;
-    }
-
-    _lastLoginAttempt = Date.now();
-    _loginAttempts++;
-    logEvent('Auto-login screen ' + screen.screen + '/3: ' + screen.desc);
-    save();
-    clickElement(screen.action);
-    return true;
+    if (Date.now() - _lastLoginTime < LOGIN_COOLDOWN) return false;
+    if (_loginAttempts >= LOGIN_MAX) { logThrottled('login-max','Auto-login gave up after '+LOGIN_MAX+' attempts.',120000); return false; }
+    var s = detectLoginScreen(); if (!s.el) { if (s.screen === 3) logThrottled('login-nocreds','Login form: creds not pre-filled.',60000); return false; }
+    _lastLoginTime = Date.now(); _loginAttempts++;
+    logEvent('Auto-login '+s.screen+'/3: '+s.desc); save(); safeClick(s.el); return true;
   }
 
-  // Reset login attempt counter when we successfully reach the game
-  function resetLoginState() {
-    if (_loginAttempts > 0) {
-      logEvent('Login successful — resuming automation.');
-      _loginAttempts = 0;
+  /* ═══════════════════════════════════════════════════════
+     9. STATE MACHINE
+     ═══════════════════════════════════════════════════════ */
+  function tick() {
+    parseTimers(); refreshTimerDisplay();
+    switch (S.machineState) {
+      case 'BOOTING': return handleBooting();
+      case 'LOGGED_OUT': return handleLoggedOut();
+      case 'LOGGING_IN': return handleLoggingIn();
+      case 'IDLE': return handleIdle();
+      case 'CLAIMING': case 'HUNTING': case 'CLAIMING_CHEESE': return handleWaiting();
+      case 'SCANNING': return;
+      case 'STUCK': return handleStuck();
     }
   }
-
-  function runPriorityActions() {
-    var readiness = automationReadiness();
-    if (!readiness.ok) {
-      // Try auto-login flow for any auth-related block
-      if (readiness.reason === 'sign-in required' || readiness.reason === 'auth restoration in progress') {
-        if (tryAutoLogin()) { return true; }
-      }
-      if (readiness.cooloff) { holdNavigation(readiness.reason); }
-      else { logThrottled('automation-pause:' + readiness.reason, 'Automation paused: ' + readiness.reason + '.', LOG_THROTTLE_MS); }
-      return true;
+  function handleBooting() {
+    if (authBlockReason()) { transition('LOGGED_OUT'); return; }
+    if (!document.querySelector('#root, #app, .navbar-content, header, nav')) { if (stateAge() > 30000) { logEvent('App never loaded, refreshing...'); window.location.reload(); } return; }
+    if (document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) {
+      logEvent('Game loaded, automation active.'); _loginAttempts = 0; transition('IDLE');
+      parseHammer(); parseLevel(); parseCraftMode();
+      if (!S.lastFullScan || Date.now() - S.lastFullScan > 15000) { transition('SCANNING'); fullScan().then(function() { transition('IDLE'); }); }
+      renderPanel(); return;
     }
-    // If we got here, we're authenticated — reset login state
-    resetLoginState();
-    if (checkStuckState()) { return true; }
-    if (tryAutoClaim()) { return true; }
-    if (tryAutoHunt()) { return true; }
-    return tryClaimCheese();
+    if (/\/oidc\/.*openid-connect/i.test(window.location.href)) { transition('LOGGED_OUT'); return; }
+    if (stateAge() > 15000) { logEvent('Navigating to game...'); window.location.assign('https://www.remilia.net/home?cartridge=beetle'); }
+  }
+  function handleLoggedOut() {
+    if (gameReady() && document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) { logEvent('Login successful.'); _loginAttempts = 0; transition('BOOTING'); return; }
+    if (tryAutoLogin()) transition('LOGGING_IN');
+    else if (stateAge() > 120000) logThrottled('login-stuck','Still logged out after 2min.',120000);
+  }
+  function handleLoggingIn() {
+    if (gameReady() && document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) { transition('BOOTING'); return; }
+    if (authBlockReason() && stateAge() > LOGIN_COOLDOWN) { transition('LOGGED_OUT'); return; }
+    if (stateAge() > 30000) transition('BOOTING');
+  }
+  function handleIdle() {
+    if (!gameReady()) { transition(authBlockReason() ? 'LOGGED_OUT' : 'BOOTING'); return; }
+    var cb = document.querySelector('.beetle-catch-module__catch-button'), hb = document.querySelector('.beetle-catch-module__hunt-button');
+    if ((cb && (cb.classList.contains('loading') || /PROCESSING/i.test(cb.textContent))) || (hb && (hb.classList.contains('loading') || /PROCESSING/i.test(hb.textContent)))) { logEvent('Buttons stuck on PROCESSING...'); transition('STUCK'); return; }
+    if (Date.now() - (S.lastPassiveScan||0) > 30000) passiveScan();
+    var r;
+    r = executeAction(ACTIONS.claim); if (r === 'fired') { transition('CLAIMING'); schedulePostAction(); return; } if (r === 'navigating') return; if (r === 'stuck') { transition('STUCK'); return; }
+    r = executeAction(ACTIONS.hunt); if (r === 'fired') { transition('HUNTING'); schedulePostAction(); return; } if (r === 'navigating') return; if (r === 'stuck') { transition('STUCK'); return; }
+    r = executeAction(ACTIONS.cheese); if (r === 'fired') { transition('CLAIMING_CHEESE'); schedulePostAction(); return; } if (r === 'navigating') return;
+    if (!_scanning && Date.now() - (S.lastFullScan||0) > STALE_MS && ensureCartridge('beetle','scan')) { transition('SCANNING'); fullScan().then(function() { transition('IDLE'); }); }
+    renderPanel();
+  }
+  var _postTimer = null;
+  function schedulePostAction() {
+    save(); if (_postTimer) clearTimeout(_postTimer);
+    _postTimer = setTimeout(function() { _postTimer = null; passiveScan(); renderPanel();
+      setTimeout(function() { if (!_scanning && S.machineState !== 'SCANNING') { transition('SCANNING'); fullScan().then(function() { transition('IDLE'); }); } }, 5000);
+    }, 8000);
+    setTimeout(function() { if (S.machineState === 'CLAIMING' || S.machineState === 'HUNTING' || S.machineState === 'CLAIMING_CHEESE') transition('IDLE'); }, ACTION_TIMEOUT);
+  }
+  function handleWaiting() { if (stateAge() > ACTION_TIMEOUT) transition('IDLE'); }
+  function handleStuck() {
+    if (stateAge() < 15000) return;
+    var cb = document.querySelector('.beetle-catch-module__catch-button'), hb = document.querySelector('.beetle-catch-module__hunt-button');
+    var still = (cb && (cb.classList.contains('loading') || /PROCESSING/i.test(cb.textContent))) || (hb && (hb.classList.contains('loading') || /PROCESSING/i.test(hb.textContent)));
+    if (!still) { logEvent('Recovered from stuck.'); transition('IDLE'); return; }
+    if (stateAge() < 60000) { logEvent('Refreshing to recover...'); save(); window.location.reload(); }
+    else { logEvent('Hard reset.'); transition('BOOTING'); window.location.assign('https://www.remilia.net/home?cartridge=beetle'); }
   }
 
-  function kickoffPriorityScan(reason, opts) {
-    opts = opts || {};
-    if (!ensureCartridge('beetle', reason)) { return true; }
-    var craftModule = document.querySelector('.crafting-module');
-    var craftVisible = isVisible(craftModule);
-    if (opts.primeHammer !== false) {
-      parseHammer();
-      save();
-    }
-    if (preferCatchView(reason)) {
-      setTimeout(function() { kickoffPriorityScan(reason, Object.assign({}, opts, {primeHammer:false})); }, craftVisible ? 600 : 1000);
-      return true;
-    }
-    parseTimers();
-    parseLevel();
-    parseCraftMode();
-    if (!opts.skipActions && runPriorityActions()) { return true; }
-    fullScan();
-    return true;
-  }
-
-  /*
-   * GAME BEHAVIOR NOTE: The BeetleBoy game can enter a "PROCESSING..." state
-   * where claim/hunt buttons show "loading" CSS class and "PROCESSING..." text.
-   * This state can persist across page reloads and blocks all automation.
-   *
-   * Known causes:
-   * - Server latency or timeout during claim/hunt
-   * - Simultaneous actions (fixed in v10.9 with one-action-per-cycle)
-   * - Network issues during RDP sessions
-   * - Session timeout/reconnection
-   *
-   * Recovery strategy:
-   * 1. Detect "loading" class on claim/hunt buttons
-   * 2. Wait 15 seconds (game might resolve naturally)
-   * 3. If still stuck, refresh the page
-   * 4. If still stuck after refresh, navigate to beetle cartridge fresh
-   * 5. Log all recovery actions for debugging
-   *
-   * After claim/hunt: always wait for game to fully process before
-   * attempting the next action. The one-action-per-cycle design ensures
-   * we never fire two actions simultaneously.
-   */
-  var _stuckSince = 0;
-  var _stuckRefreshCount = 0;
-  function checkStuckState() {
-    var claimBtn = document.querySelector('.beetle-catch-module__catch-button');
-    var huntBtn = document.querySelector('.beetle-catch-module__hunt-button');
-    var isStuck = false;
-    if (claimBtn && (claimBtn.classList.contains('loading') || /PROCESSING/i.test(claimBtn.textContent))) { isStuck = true; }
-    if (huntBtn && (huntBtn.classList.contains('loading') || /PROCESSING/i.test(huntBtn.textContent))) { isStuck = true; }
-
-    if (isStuck) {
-      if (!S.stuckSince) {
-        S.stuckSince = Date.now();
-        S.stuckRefreshCount = S.stuckRefreshCount || 0;
-        logEvent('Game buttons stuck on PROCESSING...');
-        save();
-      }
-      _stuckSince = S.stuckSince;
-      _stuckRefreshCount = S.stuckRefreshCount || 0;
-      var stuckDuration = Date.now() - _stuckSince;
-      if (stuckDuration > 15000 && _stuckRefreshCount < 3) {
-        // Try refreshing
-        _stuckRefreshCount++;
-        S.stuckRefreshCount = _stuckRefreshCount;
-        logEvent('Auto-recovering: refresh #' + _stuckRefreshCount + ' (stuck ' + Math.round(stuckDuration/1000) + 's)');
-        save();
-        window.location.reload();
-        return true;
-      }
-      if (stuckDuration > 60000) {
-        // Hard reset: navigate to beetle page fresh
-        _stuckRefreshCount = 0;
-        _stuckSince = 0;
-        S.stuckSince = 0;
-        S.stuckRefreshCount = 0;
-        logEvent('Auto-recovering: hard navigation reset');
-        save();
-        ensureCartridge('beetle', 'stuck recovery');
-        return true;
-      }
-      return true; // Still stuck, skip actions this cycle
-    } else {
-      // Recovered
-      if (_stuckSince) { logEvent('Game recovered from stuck state'); }
-      _stuckSince = 0;
-      _stuckRefreshCount = 0;
-      if (S.stuckSince || S.stuckRefreshCount) {
-        S.stuckSince = 0;
-        S.stuckRefreshCount = 0;
-        save();
-      }
-    }
-    return false;
-  }
-
-  function normalizeText(text) {
-    return (text || '').replace(/\s+/g, ' ').trim();
-  }
-
-  function isEnabledButton(btn) {
-    return !!(btn && isVisible(btn) && !btn.disabled && !btn.classList.contains('disabled') && btn.getAttribute('aria-disabled') !== 'true');
-  }
-
-  function findActionButton(selectors) {
-    var btn = firstVisible(selectors);
-    return isEnabledButton(btn) ? btn : null;
-  }
-
-  function safeClick(btn) {
-    if (!btn) { return false; }
-    try { btn.click(); return true; } catch (e) {}
-    try {
-      btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
-      return true;
-    } catch (e2) {}
-    return false;
-  }
-
-  // Returns true if an action fired OR if this cycle is intentionally blocked while preparing the surface.
-  function tryAutoClaim() {
-    if (!S.autoClaim || _scanning) { return false; }
-    if (Date.now() - _lastClaimTime < 30000) { return false; }
-    var navBC = document.querySelector('.beetle-game-nav .info');
-    if (!navBC || !/ready/i.test(navBC.textContent)) { return false; }
-    if (!ensureBeetleActionSurface('claim')) { return true; }
-    var btn = findActionButton(['.beetle-catch-module__catch-button']);
-    if (!btn) {
-      logThrottled('claim-missing', 'Claim ready but button not available yet.', LOG_THROTTLE_MS);
-      return true;
-    }
-    var btnText = normalizeText(btn.textContent);
-    if (/\bprocessing\b/i.test(btnText) || /\bloading\b/i.test(btnText) || /\d+\s*[smhd]/i.test(btnText)) {
-      logThrottled('claim-waiting', 'Claim ready but button is still settling.', LOG_THROTTLE_MS);
-      return true;
-    }
-    if (!safeClick(btn)) {
-      logThrottled('claim-click-failed', 'Claim click failed; retrying next cycle.', LOG_THROTTLE_MS);
-      return true;
-    }
-    _lastClaimTime = Date.now();
-    S.session.claims++;
-    logEvent('Auto-claimed beetle!');
-    save();
-    postActionRefresh('Post-claim', 10000);
-    return true;
-  }
-
-  function tryAutoHunt() {
-    if (!S.autoHunt || _scanning) { return false; }
-    var cheese = S.mergedInventory.cheese || 0;
-    if (cheese === 0) {
-      var cheeseDom = bodyText().match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i);
-      if (cheeseDom) { cheese = parseInt(cheeseDom[1].replace(/,/g, ''), 10); }
-    }
-    if (cheese < HUNT_COST) { return false; }
-    if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return false; }
-    if (Date.now() - _lastHuntTime < 15000) { return false; }
-    if (!ensureBeetleActionSurface('hunt')) { return true; }
-    var huntCostEl = firstVisible(['.beetle-catch-module__hunt-button-cheese-cost']);
-    if (huntCostEl && /cooldown/i.test(huntCostEl.textContent || '')) { return false; }
-    var btn = findActionButton(['.beetle-catch-module__hunt-button']);
-    if (!btn) {
-      logThrottled('hunt-missing', 'Hunt ready but button not available yet.', LOG_THROTTLE_MS);
-      return true;
-    }
-    var btnText = normalizeText(btn.textContent);
-    if (/\bcooldown\b/i.test(btnText) || /\bprocessing\b/i.test(btnText) || /\bloading\b/i.test(btnText) || /\d+\s*[smhd]/i.test(btnText)) {
-      logThrottled('hunt-waiting', 'Hunt ready but button is still settling.', LOG_THROTTLE_MS);
-      return true;
-    }
-    if (!safeClick(btn)) {
-      logThrottled('hunt-click-failed', 'Hunt click failed; retrying next cycle.', LOG_THROTTLE_MS);
-      return true;
-    }
-    _lastHuntTime = Date.now();
-    S.session.hunts++;
-    logEvent('Auto-hunted (-' + HUNT_COST + ' cheese)');
-    save();
-    postActionRefresh('Post-hunt', 8000);
-    return true;
-  }
-
-  function tryClaimCheese() {
-    if (_scanning) { return false; }
-    if (Date.now() - _lastCheeseTime < 60000) { return false; }
-    var navCheese = document.querySelector('.cheese-claim-nav .info');
-    if (!navCheese || !/ready/i.test(navCheese.textContent)) { return false; }
-    if (!ensureCartridge('cheese', 'daily cheese')) { return true; }
-    var btn = findActionButton(['.claim-button']);
-    if (!btn) {
-      logThrottled('cheese-missing', 'Daily cheese ready but button not available yet.', LOG_THROTTLE_MS);
-      return true;
-    }
-    if (!safeClick(btn)) {
-      logThrottled('cheese-click-failed', 'Daily cheese click failed; retrying next cycle.', LOG_THROTTLE_MS);
-      return true;
-    }
-    _lastCheeseTime = Date.now();
-    S.session.cheeseClaims++;
-    logEvent('Auto-claimed daily cheese!');
-    save();
-    postActionRefresh('Post-cheese', 8000);
-    return true;
-  }
-
-  /* ─── FIX 5 + 6 + 7: Styles with status strip, freshness chip, timer badges, hammer honesty ─── */
+  /* ═══════════════════════════════════════════════════════
+     10. UI
+     ═══════════════════════════════════════════════════════ */
   function injectStyles() {
-    if (document.getElementById(STYLE_ID)) { return; }
+    if (document.getElementById(STYLE_ID)) return;
     var s = document.createElement('style'); s.id = STYLE_ID;
-    s.textContent = [
-      '#',BTN_ID,'{position:fixed;left:20px;bottom:20px;z-index:999999;padding:10px 14px;background:#d7f4f7;color:#11383d;border:1px solid #9bd8e0;border-radius:12px;font-weight:700;cursor:pointer;font-size:14px;}',
-      '#',BTN_ID,':hover{background:#c0edf2;}',
-      '#',PANEL_ID,'{position:fixed;left:20px;top:50px;z-index:999999;width:380px;min-width:300px;max-width:90vw;background:#fff;border:2px solid #b8e6ec;border-radius:16px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.18);font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;color:#163238;max-height:calc(100vh - 70px);display:flex;flex-direction:column;gap:6px;overflow:hidden;resize:both;}',
-      '#',PANEL_ID,'.hidden{display:none!important;}',
-      '.bc8-header{display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;padding-bottom:4px;border-bottom:1px solid #e8f4f7;margin-bottom:2px;}',
-      '.bc8-title{font-size:18px;font-weight:800;}',
-      '.bc8-sub{font-size:11px;color:#5a7379;font-weight:700;}',
-      '.bc8-btns{display:flex;gap:3px;flex-wrap:wrap;}',
-      '.bc8-btn{background:#d9f2f6;color:#17363b;border:1px solid #b8e6ec;border-radius:6px;padding:4px 7px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;}',
-      '.bc8-btn:hover{background:#c0edf2;}.bc8-btn.on{background:#17363b;color:#fff;}',
-      '.bc8-strip{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#f7fcfd;border:1px solid #e0f0f3;border-radius:8px;font-size:11px;flex-shrink:0;}',
-      '.bc8-strip-item{display:flex;align-items:center;gap:3px;}',
-      '.bc8-strip-label{color:#6b8a90;font-weight:600;}',
-      '.bc8-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:700;}',
-      '.bc8-ready{background:#d4edda;color:#155724;}.bc8-countdown{background:#fff3cd;color:#856404;}.bc8-stale{background:#f8d7da;color:#721c24;}.bc8-fresh-ok{background:#d4edda;color:#155724;}.bc8-warming{background:#fff3cd;color:#856404;}',
-      '.bc8-card{background:#fafeff;border:1px solid #d5eef2;border-radius:8px;padding:8px;flex-shrink:0;}',
-      '.bc8-focus{background:#f0f9fb;border:1px solid #b8e6ec;border-radius:8px;padding:10px;flex-shrink:0;}',
-      '.bc8-scroll{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:8px;overflow-y:auto;overflow-x:hidden;flex-shrink:1;flex-grow:1;min-height:60px;}',
-      '.bc8-scroll::-webkit-scrollbar{width:5px;}.bc8-scroll::-webkit-scrollbar-thumb{background:#b8e6ec;border-radius:3px;}',
-      '.bc8-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;font-size:11px;line-height:1.4;}',
-      '.bc8-row-name{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:65%;}',
-      '.bc8-h{font-weight:800;font-size:13px;margin-bottom:6px;color:#11383d;}',
-      '.bc8-muted{color:#6b8a90;font-size:10px;}',
-      '.bc8-tier{font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;color:#fff;flex-shrink:0;}',
-      '.bc8-val{font-weight:700;text-align:right;white-space:nowrap;font-size:11px;}',
-      '.bc8-best-item{padding:5px 0;border-bottom:1px solid #e8f4f7;}.bc8-best-item:last-child{border-bottom:none;}',
-      '.bc8-best-name{font-weight:800;font-size:14px;color:#11383d;}',
-      '.bc8-recipe{padding:3px 0;border-bottom:1px solid #eef5f7;}.bc8-recipe:last-child{border-bottom:none;}',
-      '.bc8-recipe-name{font-weight:700;font-size:11px;}',
-      '.bc8-jd{font-size:9px;color:#8a9a9a;margin-left:4px;}',
-      '.bc8-log-line{font-size:9px;color:#6b8a90;line-height:1.4;border-bottom:1px solid #f0f7f9;padding:1px 0;}',
-      '.bc8-collapse{cursor:pointer;user-select:none;}.bc8-collapse:hover{opacity:0.8;}',
-      '.bc8-collapse-body{overflow:hidden;transition:max-height 0.2s;}.bc8-collapse-body.collapsed{max-height:0!important;padding:0!important;margin:0!important;}'
-    ].join('');
+    s.textContent = '#'+BTN_ID+'{position:fixed;left:20px;bottom:20px;z-index:999999;padding:10px 14px;background:#d7f4f7;color:#11383d;border:1px solid #9bd8e0;border-radius:12px;font-weight:700;cursor:pointer;font-size:14px;}#'+BTN_ID+':hover{background:#c0edf2;}#'+PANEL_ID+'{position:fixed;left:20px;top:50px;z-index:999999;width:380px;min-width:300px;max-width:90vw;background:#fff;border:2px solid #b8e6ec;border-radius:16px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.18);font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;color:#163238;max-height:calc(100vh - 70px);display:flex;flex-direction:column;gap:6px;overflow:hidden;resize:both;}#'+PANEL_ID+'.hidden{display:none!important;}.bc8-header{display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;padding-bottom:4px;border-bottom:1px solid #e8f4f7;margin-bottom:2px;}.bc8-title{font-size:18px;font-weight:800;}.bc8-sub{font-size:11px;color:#5a7379;font-weight:700;}.bc8-btns{display:flex;gap:3px;flex-wrap:wrap;}.bc8-btn{background:#d9f2f6;color:#17363b;border:1px solid #b8e6ec;border-radius:6px;padding:4px 7px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;}.bc8-btn:hover{background:#c0edf2;}.bc8-btn.on{background:#17363b;color:#fff;}.bc8-strip{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#f7fcfd;border:1px solid #e0f0f3;border-radius:8px;font-size:11px;flex-shrink:0;}.bc8-strip-item{display:flex;align-items:center;gap:3px;}.bc8-strip-label{color:#6b8a90;font-weight:600;}.bc8-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:700;}.bc8-ready{background:#d4edda;color:#155724;}.bc8-countdown{background:#fff3cd;color:#856404;}.bc8-stale{background:#f8d7da;color:#721c24;}.bc8-fresh{background:#d4edda;color:#155724;}.bc8-card{background:#fafeff;border:1px solid #d5eef2;border-radius:8px;padding:8px;flex-shrink:0;}.bc8-focus{background:#f0f9fb;border:1px solid #b8e6ec;border-radius:8px;padding:10px;flex-shrink:0;}.bc8-scroll{background:#fafeff;border:1px solid #d5eef2;border-radius:10px;padding:8px;overflow-y:auto;overflow-x:hidden;flex-shrink:1;flex-grow:1;min-height:60px;}.bc8-scroll::-webkit-scrollbar{width:5px;}.bc8-scroll::-webkit-scrollbar-thumb{background:#b8e6ec;border-radius:3px;}.bc8-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;font-size:11px;line-height:1.4;}.bc8-row-name{display:flex;align-items:center;gap:4px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:65%;}.bc8-h{font-weight:800;font-size:13px;margin-bottom:6px;color:#11383d;}.bc8-muted{color:#6b8a90;font-size:10px;}.bc8-tier{font-size:8px;font-weight:700;padding:1px 4px;border-radius:3px;color:#fff;flex-shrink:0;}.bc8-val{font-weight:700;text-align:right;white-space:nowrap;font-size:11px;}.bc8-recipe{padding:3px 0;border-bottom:1px solid #eef5f7;}.bc8-recipe:last-child{border-bottom:none;}.bc8-recipe-name{font-weight:700;font-size:11px;}.bc8-log-line{font-size:9px;color:#6b8a90;line-height:1.4;border-bottom:1px solid #f0f7f9;padding:1px 0;}.bc8-state{font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:#e8f4f7;color:#11383d;}';
     document.head.appendChild(s);
   }
-
-  /* ─── Render ─── */
-  var _dragState = {active:false,offsetX:0,offsetY:0};
-  var _dragBound = false;
-  function bindDragHandlers() {
-    if (_dragBound) { return; }
-    document.addEventListener('mousemove', function(e) {
-      if (!_dragState.active) { return; }
-      var p = document.getElementById(PANEL_ID);
-      if (!p) { return; }
-      p.style.left = Math.max(0, e.clientX - _dragState.offsetX) + 'px';
-      p.style.top = Math.max(0, e.clientY - _dragState.offsetY) + 'px';
-    });
-    document.addEventListener('mouseup', function() { _dragState.active = false; });
-    _dragBound = true;
+  function refreshTimerDisplay() {
+    var fmt = function(v) { return !v ? '\u2014' : /ready/i.test(v) ? '<span class="bc8-badge bc8-ready">Ready</span>' : '<span class="bc8-badge bc8-countdown">'+v+'</span>'; };
+    var el; el = document.getElementById('bc8-t-claim'); if (el) el.innerHTML = fmt(S.timers.beetleCatch);
+    el = document.getElementById('bc8-t-hunt'); if (el) el.innerHTML = fmt(S.timers.huntCooldown);
+    el = document.getElementById('bc8-t-cheese'); if (el) el.innerHTML = fmt(S.timers.dailyCheese);
+    el = document.getElementById('bc8-state'); if (el) el.textContent = S.machineState;
+    el = document.getElementById('bc8-fresh'); if (el) { var f = isFresh(); el.className = 'bc8-badge '+(f?'bc8-fresh':'bc8-stale'); el.textContent = f?'OK':'STALE'; }
   }
+  var _drag = {on:false,ox:0,oy:0}, _dragBound = false;
+  function bindDrag() { if (_dragBound) return; _dragBound = true; document.addEventListener('mousemove',function(e) { if (!_drag.on) return; var p = document.getElementById(PANEL_ID); if (p) { p.style.left = Math.max(0,e.clientX-_drag.ox)+'px'; p.style.top = Math.max(0,e.clientY-_drag.oy)+'px'; } }); document.addEventListener('mouseup',function() { _drag.on = false; }); }
+
   function renderPanel() {
-    var panel = document.getElementById(PANEL_ID);
-    if (!panel || panel.classList.contains('hidden')) { return; }
-    bindDragHandlers();
-    var inv = S.mergedInventory || {};
-    var timers = S.timers || {};
-    var stale = isStale();
-    var plans = getActionPlans(inv);
-    var progMove = stale ? null : getProgressionMove(inv);
-    var directCrafts = stale ? [] : getDirectCrafts(inv);
-    var fmtT = function(v) {
-      if (!v) { return '\u2014'; }
-      if (/ready/i.test(v)) { return '<span class="bc8-badge bc8-ready">Ready</span>'; }
-      return '<span class="bc8-badge bc8-countdown">' + v + '</span>';
-    };
-
-    var h = '';
-    // Header with freshness chip
-    var cheeseStr = inv.cheese ? inv.cheese.toLocaleString() : '';
+    var panel = document.getElementById(PANEL_ID); if (!panel || panel.classList.contains('hidden')) return; bindDrag();
+    var inv = S.mergedInventory||{}, stale = !isFresh(), crafts = stale ? [] : getDirectCrafts(inv), prog = stale ? null : getProgressionMove(inv);
+    var fmt = function(v) { return !v ? '\u2014' : /ready/i.test(v) ? '<span class="bc8-badge bc8-ready">Ready</span>' : '<span class="bc8-badge bc8-countdown">'+v+'</span>'; };
+    var h = '', cheese = inv.cheese ? inv.cheese.toLocaleString() : '';
+    // Header
     h += '<div class="bc8-header"><span class="bc8-title"><span id="bc8-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach</span>';
-    var conf = scanConfidence();
-    var freshCls = conf === 'fresh' ? 'bc8-fresh-ok' : (conf === 'warming' ? 'bc8-warming' : 'bc8-stale');
-    var freshTxt = conf === 'stale' ? 'STALE' : (conf === 'warming' ? scanAge() : scanAge());
-    h += '<span class="bc8-sub">' + (S.level ? 'Lv.' + S.level : '') + (cheeseStr ? ' \u00B7 ' + cheeseStr + ' \u{1F9C0}' : '') + ' \u00B7 <span id="bc8-fresh" class="bc8-badge ' + freshCls + '">' + freshTxt + '</span></span></div>';
-
+    h += '<span class="bc8-sub">'+(S.level?'Lv.'+S.level:'')+(cheese?' \u00B7 '+cheese+' \u{1F9C0}':'');
+    h += ' \u00B7 <span id="bc8-fresh" class="bc8-badge '+(isFresh()?'bc8-fresh':'bc8-stale')+'">'+(isFresh()?'OK':'STALE')+'</span>';
+    h += ' \u00B7 <span id="bc8-state" class="bc8-state">'+S.machineState+'</span></span></div>';
     // Buttons
-    h += '<div class="bc8-btns">';
-    h += '<button class="bc8-btn" id="bc8-fs">Full Scan</button>';
-    h += '<button class="bc8-btn ' + (S.autoClaim ? 'on' : '') + '" id="bc8-ac">Claim ' + (S.autoClaim ? 'ON' : 'OFF') + '</button>';
-    h += '<button class="bc8-btn ' + (S.autoHunt ? 'on' : '') + '" id="bc8-ah">Hunt ' + (S.autoHunt ? 'ON' : 'OFF') + '</button>';
-    h += '<button class="bc8-btn" id="bc8-mc">Miladychan</button>';
-    h += '<button class="bc8-btn" id="bc8-wk">Wiki</button>';
-    var stratLabel = S.strategy === 'endgame' ? 'Endgame' : (S.strategy === 'flowers' ? 'Flowers' : 'Broad');
-    h += '<button class="bc8-btn ' + (S.strategy!=='broad'?'on':'') + '" id="bc8-strat">' + stratLabel + '</button>';
-    h += '<button class="bc8-btn" id="bc8-exp">Export</button>';
-    h += '<button class="bc8-btn" id="bc8-rst" style="color:#c0392b;border-color:#e6b0aa;">Reset</button>';
-    h += '</div>';
-
-    // FIX 5: Status strip (compact, not a card)
+    var sl = S.strategy==='endgame'?'Endgame':(S.strategy==='flowers'?'Flowers':'Broad');
+    h += '<div class="bc8-btns"><button class="bc8-btn" id="bc8-fs">Full Scan</button>';
+    h += '<button class="bc8-btn '+(S.autoClaim?'on':'')+'" id="bc8-ac">Claim '+(S.autoClaim?'ON':'OFF')+'</button>';
+    h += '<button class="bc8-btn '+(S.autoHunt?'on':'')+'" id="bc8-ah">Hunt '+(S.autoHunt?'ON':'OFF')+'</button>';
+    h += '<button class="bc8-btn '+(S.strategy!=='broad'?'on':'')+'" id="bc8-strat">'+sl+'</button>';
+    h += '<button class="bc8-btn" id="bc8-rst" style="color:#c0392b;border-color:#e6b0aa;">Reset</button></div>';
+    // Status strip
     h += '<div class="bc8-strip">';
-    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Hammer:</span> ' + (S.currentHammer ? dn(S.currentHammer) : '\u2014') + '</div>';
-    if (S.currentHammerBonus != null) {
-      h += '<div class="bc8-strip-item"><span class="bc8-strip-label">+' + S.currentHammerBonus + '%</span> / <span id="bc8-hammer-break"' + (S.hammerBreakIsLive && S.currentHammerBreakChance > (HAMMER_STATS[S.currentHammer]||{}).baseBreak ? ' style="color:#e74c3c;font-weight:800;"' : '') + '>' + S.currentHammerBreakChance + '% break</span></div>';
-    }
-    if (S.brokenHammers && S.brokenHammers.length > 0) {
-      h += '<div class="bc8-strip-item"><span style="color:#e74c3c;font-weight:700;">Broken:</span> ' + S.brokenHammers.map(dn).join(', ') + '</div>';
-    }
-    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Claim:</span> <span id="bc8-t-claim">' + fmtT(timers.beetleCatch) + '</span></div>';
-    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Hunt:</span> <span id="bc8-t-hunt">' + fmtT(timers.huntCooldown) + '</span></div>';
-    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Cheese:</span> <span id="bc8-t-cheese">' + fmtT(timers.dailyCheese) + '</span></div>';
-    if (S.craftMode) { h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Mode:</span> ' + S.craftMode + '</div>'; }
+    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Hammer:</span> '+(S.currentHammer?dn(S.currentHammer):'\u2014')+'</div>';
+    if (S.currentHammerBonus!=null) h += '<div class="bc8-strip-item"><span class="bc8-strip-label">+'+S.currentHammerBonus+'%</span> / '+S.currentHammerBreakChance+'% break</div>';
+    if (S.brokenHammers&&S.brokenHammers.length) h += '<div class="bc8-strip-item"><span style="color:#e74c3c;font-weight:700;">Broken:</span> '+S.brokenHammers.map(dn).join(', ')+'</div>';
+    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Claim:</span> <span id="bc8-t-claim">'+fmt(S.timers.beetleCatch)+'</span></div>';
+    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Hunt:</span> <span id="bc8-t-hunt">'+fmt(S.timers.huntCooldown)+'</span></div>';
+    h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Cheese:</span> <span id="bc8-t-cheese">'+fmt(S.timers.dailyCheese)+'</span></div>';
+    if (S.craftMode) h += '<div class="bc8-strip-item"><span class="bc8-strip-label">Mode:</span> '+S.craftMode+'</div>';
     h += '</div>';
-
-    // Staleness warning
-    if (stale) {
-      h += '<div style="background:#fff3f3;border:1px solid #e6b0aa;border-radius:8px;padding:6px;color:#c0392b;font-weight:800;font-size:11px;flex-shrink:0;">Inventory stale. Hit Full Scan.</div>';
+    if (stale) h += '<div style="background:#fff3f3;border:1px solid #e6b0aa;border-radius:8px;padding:6px;color:#c0392b;font-weight:800;font-size:11px;flex-shrink:0;">Inventory stale. Hit Full Scan.</div>';
+    // Next moves
+    var sb = S.strategy==='endgame'?'bc8-countdown':(S.strategy==='flowers'?'bc8-stale':'bc8-fresh');
+    h += '<div class="bc8-focus"><div class="bc8-h">Next moves <span class="bc8-badge '+sb+'" style="font-size:8px;">'+sl.toUpperCase()+'</span></div>';
+    if (prog && (prog.type==='direct'||prog.type==='prereq')) {
+      var pr = RECIPES.find(function(r){return r.label===prog.label;});
+      h += '<div style="font-weight:800;font-size:14px;">'+dn(prog.goal)+' <span class="bc8-badge bc8-fresh">GOAL</span></div>';
+      if (pr) h += '<div class="bc8-muted">\u2705 '+pr.inputs.map(tokHuman).join(' + ')+'</div>';
+      if (prog.type==='prereq') h += '<div class="bc8-muted">\u{1F536} '+prog.reason+'</div>';
     }
-
-    // FIX 5: Next moves as visual focal point
-    var stratBadgeCls = S.strategy === 'endgame' ? 'bc8-countdown' : (S.strategy === 'flowers' ? 'bc8-warming' : 'bc8-fresh-ok');
-    var stratBadgeText = S.strategy === 'endgame' ? 'ENDGAME' : (S.strategy === 'flowers' ? 'FLOWERS' : 'BROAD');
-    h += '<div class="bc8-focus"><div class="bc8-h">Next moves <span class="bc8-badge ' + stratBadgeCls + '" style="font-size:8px;">' + stratBadgeText + '</span></div>';
-    if (!plans.length) {
-      h += '<div class="bc8-muted">' + (stale ? 'Scan inventory first.' : 'No craftable moves. Farm more materials.') + '</div>';
-    } else {
-      for (var pi = 0; pi < plans.length; pi++) {
-        var p = plans[pi];
-        var fragileTag = p.fragile ? ' <span style="color:#e67e22;font-size:9px;">(verify qty)</span>' : '';
-        var progTag = p.progression ? ' <span class="bc8-badge bc8-fresh-ok" style="margin-left:4px;">GOAL</span>' : '';
-        h += '<div class="bc8-best-item"><div class="bc8-best-name">' + (pi+1) + '. ' + p.goal + progTag + fragileTag + '</div>';
-        for (var si = 0; si < p.steps.length; si++) {
-          var step = p.steps[si];
-          var check = step.ready ? '\u2705' : '\u{1F536}';
-          var rng = (step.note === 'RNG') ? ' <span style="color:#e67e22;font-size:9px;">(RNG)</span>' : '';
-          if (p.steps.length === 1) {
-            h += '<div class="bc8-muted">' + check + ' ' + step.inputs + rng + '</div>';
-          } else {
-            h += '<div class="bc8-muted">' + check + ' Step ' + (si+1) + ': ' + step.label + ' <span style="color:#9ab;">(' + step.inputs + ')</span>' + rng + '</div>';
-          }
-        }
-        h += '</div>';
-      }
+    var shown = 0; for (var ci = 0; ci < crafts.length && shown < 3; ci++) {
+      if (prog && crafts[ci].label === prog.label) continue;
+      h += '<div style="margin-top:4px;"><span style="font-weight:700;">'+crafts[ci].label+'</span> '+(crafts[ci].type==='assemble'?'<span class="bc8-badge bc8-fresh">SAFE</span>':'<span class="bc8-badge bc8-countdown">RNG</span>')+'</div>';
+      h += '<div class="bc8-muted">'+crafts[ci].inputs.map(tokHuman).join(' + ')+'</div>'; shown++;
     }
-    // Show blocked progression goal if the top move isn't progression
-    if (progMove && progMove.type === 'blocked') {
-      h += '<div class="bc8-muted" style="margin-top:4px;padding-top:4px;border-top:1px solid #e8f4f7;">';
-      h += '<b>Goal: ' + dn(progMove.goal) + '</b> \u2014 ' + progMove.reason;
-      if (progMove.via) { h += '<br><span style="color:#5b8dd9;">\u2192 ' + progMove.via + '</span>'; }
-      h += '</div>';
-    }
+    if (prog && prog.type==='blocked') { h += '<div class="bc8-muted" style="margin-top:4px;border-top:1px solid #e8f4f7;padding-top:4px;"><b>Goal: '+dn(prog.goal)+'</b> \u2014 '+prog.reason; if (prog.via) h += '<br><span style="color:#5b8dd9;">\u2192 '+prog.via+'</span>'; h += '</div>'; }
+    if (!prog && !crafts.length) h += '<div class="bc8-muted">'+(stale?'Scan first.':'No craftable moves. Farm more.')+'</div>';
     h += '</div>';
-
-    // Progression + Collection (combined compact card)
-    var stage = getStage(inv);
-    var stageInfo = getNextStageGoals(inv, stage);
-    var col = getCollection(inv);
-    var allMissing = col.missingB.map(dn).concat(col.missingF.map(dn));
-    h += '<div class="bc8-card">';
-    // Progress bar
-    h += '<div style="display:flex;gap:2px;margin-bottom:4px;">';
-    var stageColors = ['#7a8a7a','#b87333','#5b8dd9','#9b59b6','#e67e22','#e74c3c','#f1c40f'];
-    for (var si2 = 0; si2 < 7; si2++) {
-      h += '<div style="flex:1;height:4px;border-radius:2px;background:' + (si2 < stage ? stageColors[si2] : '#d5e8ec') + ';"></div>';
-    }
+    // Progression
+    var stage = getStage(inv), col = getCollection(inv);
+    h += '<div class="bc8-card"><div style="display:flex;gap:2px;margin-bottom:4px;">';
+    var sc = ['#7a8a7a','#b87333','#5b8dd9','#9b59b6','#e67e22','#e74c3c','#f1c40f'];
+    for (var si = 0; si < 7; si++) h += '<div style="flex:1;height:4px;border-radius:2px;background:'+(si<stage?sc[si]:'#d5e8ec')+';"></div>';
+    h += '</div><div class="bc8-row"><div>Stage '+stage+'/7</div><div class="bc8-val">Beetles '+col.ownedB.length+'/'+col.totalB+' \u00B7 Flowers '+col.ownedF.length+'/'+col.totalF+'</div></div>';
+    var miss = col.missingB.map(dn).concat(col.missingF.map(dn));
+    if (miss.length > 0 && miss.length <= 8) h += '<div class="bc8-muted">Missing: '+miss.join(', ')+'</div>';
     h += '</div>';
-    h += '<div class="bc8-row"><div>Stage ' + stage + '/7 \u00B7 ' + (STAGES[stage-1] ? STAGES[stage-1].name : 'Starting') + '</div><div class="bc8-val">Beetles ' + col.ownedB.length + '/' + col.totalB + ' \u00B7 Flowers ' + col.ownedF.length + '/' + col.totalF + '</div></div>';
-    if (stageInfo.next && stageInfo.goals.length) {
-      h += '<div class="bc8-muted">Next: ' + stageInfo.goals.join(', ') + '</div>';
-    }
-    if (allMissing.length > 0 && allMissing.length <= 8) {
-      h += '<div class="bc8-muted">Missing: ' + allMissing.join(', ') + '</div>';
-    }
+    // You can make
+    h += '<div class="bc8-scroll" style="max-height:120px;"><div class="bc8-h">You can make ('+crafts.length+')</div>';
+    if (!crafts.length) h += '<div class="bc8-muted">'+(stale?'Scan first.':'No recipes available.')+'</div>';
+    for (var di = 0; di < crafts.length; di++) { var dc = crafts[di]; h += '<div class="bc8-recipe"><div class="bc8-recipe-name">'+dc.label+' '+(dc.type==='assemble'?'<span class="bc8-badge bc8-fresh">SAFE</span>':'<span class="bc8-badge bc8-countdown">RNG</span>')+'</div><div class="bc8-muted">'+dc.inputs.map(tokHuman).join(' + ')+'</div></div>'; }
     h += '</div>';
-
-    // You can make (scrollable)
-    h += '<div class="bc8-scroll" style="max-height:120px;"><div class="bc8-h">You can make (' + directCrafts.length + ')</div>';
-    if (!directCrafts.length) {
-      h += '<div class="bc8-muted">' + (stale ? 'Scan first.' : 'No recipes available.') + '</div>';
-    } else {
-      for (var dci = 0; dci < directCrafts.length; dci++) {
-        var dc2 = directCrafts[dci];
-        var craftBadge = dc2.type === 'assemble' ? '<span class="bc8-badge bc8-fresh-ok" style="margin-left:4px;">SAFE</span>' : '<span class="bc8-badge bc8-countdown" style="margin-left:4px;">RNG</span>';
-        var hammerRec = '';
-        if (dc2.type === 'smash') {
-          var rec = recommendHammer(dc2.label, S.ownedHammers || [], dc2.type);
-          if (rec) { hammerRec = ' <span class="bc8-muted">Use: ' + dn(rec) + '</span>'; }
-        }
-        h += '<div class="bc8-recipe"><div class="bc8-recipe-name">' + dc2.label + craftBadge + '</div><div class="bc8-muted">' + dc2.inputs.map(tokHuman).join(' + ') + hammerRec + '</div></div>';
-      }
-    }
-    h += '</div>';
-
-    // Inventory (scrollable)
+    // Inventory
     h += '<div class="bc8-scroll" style="max-height:200px;"><div class="bc8-h">Inventory</div>';
-    var junkTotal = cnt(inv, ANY_JUNK);
-    var junkTypes = ANY_JUNK.filter(function(k) { return (inv[k]||0) > 0; }).length;
-    var displayItems = Object.keys(inv).filter(function(k) { return !JUNK_SET.has(k) && !SKIP_DISPLAY.has(k) && k !== 'cheese'; })
-      .sort(function(a,b) { return (inv[b]||0) - (inv[a]||0); });
-    for (var ii = 0; ii < displayItems.length; ii++) {
-      var ik = displayItems[ii];
-      var tier = TIER_MAP[ik];
-      var badge = tier ? '<span class="bc8-tier" style="background:' + (TIER_COLORS[tier]||'#888') + '">' + tier + '</span>' : '';
-      h += '<div class="bc8-row"><div class="bc8-row-name">' + dn(ik) + ' ' + badge + '</div><div class="bc8-val">' + inv[ik] + '</div></div>';
-    }
-    if (junkTotal > 0) {
-      h += '<div class="bc8-row"><div class="bc8-row-name">Junk Items <span class="bc8-tier" style="background:#888">Junk</span></div><div class="bc8-val">' + junkTotal + ' <span class="bc8-jd">(' + junkTypes + ' types)</span></div></div>';
-    }
+    var items = Object.keys(inv).filter(function(k) { return !JUNK_SET.has(k) && !SKIP_DISPLAY.has(k) && k !== 'cheese'; }).sort(function(a,b) { return (inv[b]||0)-(inv[a]||0); });
+    for (var ii = 0; ii < items.length; ii++) { var ik = items[ii], tier = TIER_MAP[ik]; h += '<div class="bc8-row"><div class="bc8-row-name">'+dn(ik)+' '+(tier?'<span class="bc8-tier" style="background:'+(TIER_COLORS[tier]||'#888')+'">'+tier+'</span>':'')+'</div><div class="bc8-val">'+inv[ik]+'</div></div>'; }
+    var jt = cnt(inv,ANY_JUNK); if (jt > 0) { var jn = ANY_JUNK.filter(function(k){return (inv[k]||0)>0;}).length; h += '<div class="bc8-row"><div class="bc8-row-name">Junk <span class="bc8-tier" style="background:#888">Junk</span></div><div class="bc8-val">'+jt+' ('+jn+' types)</div></div>'; }
     h += '</div>';
-
-    // Session Stats (compact single-line + gained)
-    var sess = S.session || {};
-    var sessionMins = Math.round((Date.now() - (sess.startTime || Date.now())) / 60000);
-    var durStr = sessionMins < 60 ? sessionMins + 'm' : Math.floor(sessionMins/60) + 'h' + (sessionMins%60 ? ' ' + (sessionMins%60) + 'm' : '');
-    h += '<div class="bc8-card">';
-    var xpStr = (sess.totalXP||0) > 0 ? ' \u00B7 ' + (sess.totalXP||0) + ' XP' : '';
-    h += '<div class="bc8-row"><div class="bc8-h" style="margin:0;">Session</div><div class="bc8-val">' + durStr + ' \u00B7 ' + (sess.claims||0) + 'c/' + (sess.hunts||0) + 'h' + xpStr + '</div></div>';
-    if (sess.gains && sess.gains.length > 0) {
-      var gainCounts = {};
-      for (var gi = 0; gi < sess.gains.length; gi++) {
-        gainCounts[sess.gains[gi]] = (gainCounts[sess.gains[gi]]||0) + 1;
-      }
-      var gainStr = Object.keys(gainCounts).map(function(name) {
-        return gainCounts[name] > 1 ? name + ' x' + gainCounts[name] : name;
-      }).join(', ');
-      h += '<div class="bc8-muted">Gained: ' + gainStr + '</div>';
-    }
+    // Session
+    var sess = S.session||{}, mins = Math.round((Date.now()-(sess.startTime||Date.now()))/60000);
+    var dur = mins < 60 ? mins+'m' : Math.floor(mins/60)+'h'+(mins%60?' '+(mins%60)+'m':'');
+    h += '<div class="bc8-card"><div class="bc8-row"><div class="bc8-h" style="margin:0;">Session</div><div class="bc8-val">'+dur+' \u00B7 '+(sess.claims||0)+'c/'+(sess.hunts||0)+'h'+(sess.totalXP?' \u00B7 '+sess.totalXP+' XP':'')+'</div></div>';
+    if (sess.gains && sess.gains.length) { var gc = {}; for (var gi = 0; gi < sess.gains.length; gi++) gc[sess.gains[gi]] = (gc[sess.gains[gi]]||0)+1; h += '<div class="bc8-muted">Gained: '+Object.keys(gc).map(function(n){return gc[n]>1?n+' x'+gc[n]:n;}).join(', ')+'</div>'; }
     h += '</div>';
-
-    // Resource Planner — show what's needed for next missing collectible goals
-    var col2 = getCollection(inv);
-    var plannerGoals = [];
-    // Check each missing beetle and trace what's needed
-    var GOAL_RECIPES = {
-      'goliath': {name:'Goliath Beetle', needs:[{item:'pinecone',label:'Pinecone'},{item:'pond',label:'Pond Beetle'}], prereq:'Mithril Bridge (Mithril beetle + Mithril Pollen) for Pinecone'},
-      'sunset_moth': {name:'Sunset Moth', needs:[{item:'gazania',label:'Gazania'},{item:'any_adamantine_beetle',label:'Adamantine beetle'}], prereq:'Transmute Gazania (Green + Adamantine beetle + Junk Cube)'},
-      'mars_rhino': {name:'Mars Rhino', needs:[{item:'black_lotus',label:'Black Lotus'},{item:'sunset_moth',label:'Sunset Moth'},{item:'sabertooth_longhorn',label:'Sabertooth'}], prereq:'Need all 3 Mithril artifacts for Black Lotus'},
-      'hercules': {name:'Hercules Beetle', needs:[{item:'golden_scarab',label:'Golden Scarab'},{item:'pollen_adamantine',label:'Adamantine Pollen'},{item:'purple',label:'Purple Beetle'}], prereq:'Golden Scarab is drop-only (Diamond rarity)'}
-    };
-    for (var gk in GOAL_RECIPES) {
-      if ((inv[gk]||0) > 0) { continue; } // Already have it
-      var goal = GOAL_RECIPES[gk];
-      var missing2 = [];
-      var have2 = [];
-      for (var ni = 0; ni < goal.needs.length; ni++) {
-        var need = goal.needs[ni];
-        if (tokenCount(inv, need.item) > 0) { have2.push(need.label); }
-        else { missing2.push(need.label); }
-      }
-      if (missing2.length > 0) {
-        plannerGoals.push({name: goal.name, have: have2, missing: missing2, prereq: goal.prereq});
-      }
-    }
-    if (plannerGoals.length > 0) {
-      h += '<div class="bc8-scroll" style="max-height:120px;"><div class="bc8-h">Resource Planner</div>';
-      for (var gi = 0; gi < Math.min(plannerGoals.length, 3); gi++) {
-        var g = plannerGoals[gi];
-        h += '<div style="margin-bottom:6px;">';
-        h += '<div style="font-weight:700;font-size:11px;">' + g.name + '</div>';
-        if (g.have.length > 0) { h += '<div class="bc8-muted">\u2705 Have: ' + g.have.join(', ') + '</div>'; }
-        h += '<div class="bc8-muted">\u274C Need: ' + g.missing.join(', ') + '</div>';
-        h += '<div class="bc8-muted" style="color:#5b8dd9;">\u2192 ' + g.prereq + '</div>';
-        h += '</div>';
-      }
-      h += '</div>';
-    }
-
-    // Activity Log
-    h += '<div class="bc8-scroll" style="max-height:80px;flex:1;"><div class="bc8-h">Log</div>';
-    h += '<div id="bc8-log">' + S.log.slice().reverse().map(function(l) { return '<div class="bc8-log-line">' + l + '</div>'; }).join('') + '</div></div>';
-
+    // Log
+    h += '<div class="bc8-scroll" style="max-height:80px;flex:1;"><div class="bc8-h">Log</div><div id="bc8-log">'+S.log.slice().reverse().map(function(l){return '<div class="bc8-log-line">'+l+'</div>';}).join('')+'</div></div>';
     panel.innerHTML = h;
-
-    // Bind buttons
-    document.getElementById('bc8-fs').addEventListener('click', function() { kickoffPriorityScan('manual scan'); });
-    document.getElementById('bc8-ac').addEventListener('click', function() { S.autoClaim = !S.autoClaim; save(); renderPanel(); });
-    document.getElementById('bc8-ah').addEventListener('click', function() { S.autoHunt = !S.autoHunt; save(); renderPanel(); });
-    document.getElementById('bc8-mc').addEventListener('click', function() { window.open('https://boards.miladychan.org/v/324142','_blank'); });
-    document.getElementById('bc8-wk').addEventListener('click', function() { window.open('https://beetle.wiki/doku.php?id=start','_blank'); });
-    document.getElementById('bc8-strat').addEventListener('click', function() {
-      var modes = ['endgame', 'broad', 'flowers'];
-      var idx = modes.indexOf(S.strategy);
-      S.strategy = modes[(idx + 1) % modes.length];
-      save(); renderPanel();
-    });
-    document.getElementById('bc8-exp').addEventListener('click', function() { downloadExport(); });
-    document.getElementById('bc8-rst').addEventListener('click', function() {
-      if (confirm('Clear all data and rescan?')) { resetStore(); fullScan(); }
-    });
-    document.getElementById('bc8-minimize').addEventListener('click', function(e) {
-      e.stopPropagation();
-      var p = document.getElementById(PANEL_ID);
-      if (p) { p.classList.add('hidden'); S.panelOpen = false; save(); }
-    });
-    // Draggable header
-    var header = document.querySelector('.bc8-header');
-    if (header) {
-      header.addEventListener('mousedown', function(e) {
-        if (e.target.id === 'bc8-minimize') { return; }
-        var p = document.getElementById(PANEL_ID);
-        if (!p) { return; }
-        _dragState.active = true;
-        _dragState.offsetX = e.clientX - p.offsetLeft;
-        _dragState.offsetY = e.clientY - p.offsetTop;
-        e.preventDefault();
-      });
-    }
+    // Bind
+    document.getElementById('bc8-fs').addEventListener('click',function() { transition('SCANNING'); fullScan().then(function(){transition('IDLE');}); });
+    document.getElementById('bc8-ac').addEventListener('click',function() { S.autoClaim = !S.autoClaim; save(); renderPanel(); });
+    document.getElementById('bc8-ah').addEventListener('click',function() { S.autoHunt = !S.autoHunt; save(); renderPanel(); });
+    document.getElementById('bc8-strat').addEventListener('click',function() { var m = ['endgame','broad','flowers']; S.strategy = m[(m.indexOf(S.strategy)+1)%m.length]; save(); renderPanel(); });
+    document.getElementById('bc8-rst').addEventListener('click',function() { if (confirm('Clear all data?')) { S = defaults(); save(); renderPanel(); fullScan(); } });
+    document.getElementById('bc8-minimize').addEventListener('click',function(e) { e.stopPropagation(); var p = document.getElementById(PANEL_ID); if (p) { p.classList.add('hidden'); S.panelOpen = false; save(); } });
+    var hdr = document.querySelector('.bc8-header'); if (hdr) hdr.addEventListener('mousedown',function(e) { if (e.target.id==='bc8-minimize') return; var p = document.getElementById(PANEL_ID); if (!p) return; _drag.on=true; _drag.ox=e.clientX-p.offsetLeft; _drag.oy=e.clientY-p.offsetTop; e.preventDefault(); });
   }
 
-  /* ─── UI ─── */
   function ensureUI() {
     injectStyles();
-    if (!document.getElementById(BTN_ID)) {
-      var btn = document.createElement('button'); btn.id = BTN_ID;
-      btn.textContent = '\u{1FAB2} Beetle Coach';
-      btn.addEventListener('click', function() {
-        var p = document.getElementById(PANEL_ID);
-        if (!p) { p = document.createElement('div'); p.id = PANEL_ID; document.body.appendChild(p); }
-        p.classList.toggle('hidden');
-        S.panelOpen = !p.classList.contains('hidden'); save();
-        if (S.panelOpen) { parseTimers(); renderPanel(); }
-      });
-      document.body.appendChild(btn);
-    }
-    if (!document.getElementById(PANEL_ID)) {
-      var p = document.createElement('div'); p.id = PANEL_ID;
-      if (!S.panelOpen) { p.classList.add('hidden'); }
-      document.body.appendChild(p);
-    }
+    if (!document.getElementById(BTN_ID)) { var btn = document.createElement('button'); btn.id = BTN_ID; btn.textContent = '\u{1FAB2} Beetle Coach'; btn.addEventListener('click',function() { var p = document.getElementById(PANEL_ID); if (!p) { p = document.createElement('div'); p.id = PANEL_ID; document.body.appendChild(p); } p.classList.toggle('hidden'); S.panelOpen = !p.classList.contains('hidden'); save(); if (S.panelOpen) { parseTimers(); renderPanel(); } }); document.body.appendChild(btn); }
+    if (!document.getElementById(PANEL_ID)) { var p = document.createElement('div'); p.id = PANEL_ID; if (!S.panelOpen) p.classList.add('hidden'); document.body.appendChild(p); }
   }
 
-  /* ─── Boot ─── */
+  /* ═══════════════════════════════════════════════════════
+     11. BOOT
+     ═══════════════════════════════════════════════════════ */
   var _booted = false;
-  var _intervals = [];
-  var _startupRetryTimer = null;
-  function boot() {
-    if (_booted) { return; }
-    _booted = true;
-    _bootTime = Date.now();
-    _intervals.forEach(function(id) { clearInterval(id); });
-    _intervals = [];
-    _navigating = false; // Reset nav flag on boot
-    ensureUI();
-    kickoffPriorityScan('startup');
-    if (_startupRetryTimer) { clearTimeout(_startupRetryTimer); }
-    _startupRetryTimer = setTimeout(function() {
-      _startupRetryTimer = null;
-      if (!S.lastFullScan || isStale() || Date.now() - S.lastFullScan > 15000) {
-        kickoffPriorityScan('startup retry');
-      }
-    }, BOOT_NAV_DELAY + 1000);
-    _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
-    _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
-    // Only fire ONE action per cycle, and always prioritize claim/hunt over scans
-    _intervals.push(setInterval(runPriorityActions, ACTION_INTERVAL));
-    // On OIDC pages, try auto-login immediately and periodically
-    if (/\/oidc\/.*openid-connect/i.test(window.location.href)) {
-      setTimeout(function() { tryAutoLogin(); }, 2000);
-      _intervals.push(setInterval(function() { tryAutoLogin(); }, LOGIN_COOLDOWN + 1000));
-    }
-    console.log('[BeetleCoach v11.7] booted');
-  }
-  function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
-  if (document.readyState === 'complete' || document.readyState === 'interactive') {
-    setTimeout(safeBoot, 1500);
-  } else {
-    window.addEventListener('load', function() { setTimeout(safeBoot, 1500); });
-  }
-  setTimeout(safeBoot, 3000);
-  setTimeout(safeBoot, 5000);
-  var obs = new MutationObserver(function() {
-    if (!document.getElementById(BTN_ID)) { _booted = false; setTimeout(safeBoot, 500); }
-  });
-  obs.observe(document.documentElement, {childList:true, subtree:true});
+  function boot() { if (_booted) return; _booted = true; _bootTime = Date.now(); transition('BOOTING'); ensureUI(); renderPanel(); setInterval(tick, TICK_MS); setTimeout(tick, 1000); console.log('[BeetleCoach v12] booted'); }
+  function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail',e); } }
+  if (document.readyState === 'complete' || document.readyState === 'interactive') setTimeout(safeBoot,1500);
+  else window.addEventListener('load',function() { setTimeout(safeBoot,1500); });
+  setTimeout(safeBoot,3000); setTimeout(safeBoot,5000);
+  var obs = new MutationObserver(function() { if (!document.getElementById(BTN_ID)) { _booted = false; setTimeout(safeBoot,500); } });
+  obs.observe(document.documentElement,{childList:true,subtree:true});
 })();

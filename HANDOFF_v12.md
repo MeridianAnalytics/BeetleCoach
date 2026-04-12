@@ -1,0 +1,173 @@
+# BeetleCoach v12 Refactor Handoff
+
+_Written 2026-04-12 for Claude/Codex sessions continuing this work._
+
+## What This Is
+
+BeetleCoach is a Tampermonkey userscript (`beetle_coach.user.js`) that automates and advises play in the BeetleBoy game on remilia.net. It runs in-browser, injected by Tampermonkey, and persists state via `GM_getValue`/`GM_setValue`.
+
+**Repo:** `MeridianAnalytics/BeetleCoach` (GitHub)  
+**Production file:** `C:\BeetleCoach\beetle_coach.user.js`  
+**Backup:** `Z:\BeetleCoach` (READ ONLY — never overwrite C:\ from Z:\)  
+**Current version:** 11.7.0 (2168 lines)  
+**Target version:** 12.0.0  
+
+## What v12 Must Do
+
+### Core Automation (must be rock-solid)
+
+1. **Auto-claim beetles** — The game has a 2-hour Beetle Catch timer. When it shows "ready" in the `.beetle-game-nav .info` element, click `.beetle-catch-module__catch-button`. The button must not be in `loading` class or show "PROCESSING" text.
+
+2. **Auto-hunt beetles** — Costs 20 cheese per hunt. Click `.beetle-catch-module__hunt-button` when:
+   - `S.autoHunt` is true (default: true in v12)
+   - Cheese count >= `HUNT_COST` (20)
+   - Cheese count after hunt >= `MIN_CHEESE_RESERVE` (100)
+   - No hunt cooldown active (check `.beetle-catch-module__hunt-button-cheese-cost` for "cooldown" text)
+   - The hunt button is NOT `disconnected` class — BUT clicking disconnected buttons is fine (it auto-loads the cartridge AND performs the action, discovered in v11)
+
+3. **Daily cheese claim** — Every ~6 hours. Check `.cheese-claim-nav .info` for "ready". Navigate to `?cartridge=cheese`, click `.claim-button`. Then navigate back to `?cartridge=beetle`.
+
+4. **Auto-login on session expiry** — The site uses OIDC auth that expires. Three screens to click through:
+   - **Screen 1 (main site):** Page shows "SIGN IN or register", no game nav elements present. Click the element with text "SIGN IN" (top-right nav area).
+   - **Screen 2 (auth portal):** URL contains `/oidc/...openid-connect`. Page shows "REMILIA AUTHENTICATION PORTAL" with "SIGN IN" and "NEW ACCOUNT" buttons. Click "SIGN IN".
+   - **Screen 3 (login form):** Same URL pattern. Has `input[name="username"]` and `input[type="password"]` fields. If credentials are pre-populated (browser autofill), click the submit button. If not pre-filled, log a message and wait for manual login.
+   
+   The `@run-at document-start` header is critical — it lets us suppress OIDC `alert()` dialogs that would otherwise freeze all JS on the page.
+
+5. **Stuck state recovery** — Game buttons can get stuck showing "PROCESSING..." text or `loading` CSS class. Escalating recovery: wait 15s → refresh page → wait again → hard navigate to `?cartridge=beetle`.
+
+### One-Action-Per-Cycle Rule
+
+**Critical design constraint:** The game can only process one action at a time. If you fire claim AND hunt in the same 10-second cycle, the game silently drops one. The automation must execute at most ONE action per tick, in priority order: **claim > hunt > cheese > scan**.
+
+### Cartridge Navigation
+
+The game has multiple "cartridges" (tabs). Beetle automation needs `?cartridge=beetle`, cheese needs `?cartridge=cheese`. The `ensureCartridge(cartridge, reason)` function handles navigation. Key behaviors:
+- Check `currentCartridge()` from URL params
+- If already there, return true (ready to act)
+- If not, click the nav element or do `window.location.assign`
+- Return false (not ready yet — caller should bail and retry next tick)
+- Navigation has a 60-second cooldown (`NAV_RETRY_COOLDOWN`) to prevent ping-pong
+
+### What NOT to Automate
+
+**Junk cleanup (drag-to-trash)** — Extensively tested in v11. Cannot be automated. The game uses React internal component state for drag-and-drop that cannot be triggered externally (tried: DOM clicks, synthetic drag events, HTML5 drag API, React props mousedown/mouseup, physical mouse simulation). Do not attempt.
+
+## Architecture for v12
+
+### State Machine
+
+Replace the current three `setInterval` loops + scattered globals with a single `tick()` function called every 5 seconds and a persisted `S.machineState`:
+
+```
+BOOTING → LOGGED_OUT → LOGGING_IN → LOADING → IDLE
+                                                 ↓
+                              CLAIMING / HUNTING / CLAIMING_CHEESE / SCANNING
+                                                 ↓
+                                              STUCK → RECOVERING → BOOTING
+```
+
+`handleIdle()` checks priority order: stuck detection → claim → hunt → cheese → staleness scan. Each action transitions to its specific state, which has a timeout that transitions back to IDLE (or to STUCK if the action didn't complete).
+
+### Key Functions to Preserve
+
+- `scanPage(sel, imgCls, cntCls)` — DOM scraping for inventory items. Returns `{items, unresolved}`. Uses layered extraction: background-image URL → `<img src>` → alt/title attributes.
+- `fullScan()` — Async function that paginates through inventory pages using fingerprint-based loop detection. Must remain async.
+- `passiveScan()` — Lightweight scan without pagination. Only updates existing items or adds confirmed new items (two-sighting rule).
+- `parseTimers()` — Reads timer text from `.beetle-game-nav .info`, `.cheese-claim-nav .info`, `.beetle-catch-module__cooldown-timer`, `.beetle-catch-module__hunt-button-cheese-cost`.
+- `parseHammer()` — Reads `.crafting-module__hammer-row` slots. Distinguishes owned vs broken (`--empty` class) vs undiscovered.
+- `getDirectCrafts(inv)` — Returns craftable recipes sorted by value. Filters out owned outputs, handles hammer tier logic.
+- `getProgressionMove(inv)` — Goal-directed engine using ENDGAME_CHAIN / BROAD_CHAIN / FLOWER_CHAIN. Returns the best actionable progression step.
+
+### Key Functions to Remove/Simplify
+
+- `clickElement()` — Delete, use `safeClick()` everywhere (identical implementation)
+- `PREREQ_MAP` inside `getActionPlans()` — Delete, merge into `PREREQ_RECIPES`
+- `exportInventory()` / `downloadExport()` — Remove or move to console-only
+- Resource Planner (`GOAL_RECIPES` in `renderPanel`) — Duplicates chain data, remove
+- `scanConfidence()` / `scanAge()` — Replace with binary `isFresh()`
+- Live hammer break-chance probing (mouseenter hover trick) — Fragile, remove
+- 2-step chain plans and cross-plan consumption check in `getActionPlans()` — Remove
+- `OLD_STORE_KEY` v7 migration — Remove
+- `session.beetles` migration — Remove (v12 major version wipe handles this)
+
+## Data Model
+
+### Persisted State (`GM_getValue('beetle_coach_v8_store')`)
+
+```javascript
+{
+  ver: '12.0.0',
+  mergedInventory: { green: 970, ladybug: 166, cheese: 15577, ... },
+  currentHammer: 'hammer_t4',  // best available
+  ownedHammers: ['hammer_t4', 'hammer_t2'],
+  brokenHammers: [],
+  discoveredHammers: ['hammer_t1', 'hammer_t2', 'hammer_t3', 'hammer_t4'],
+  timers: { beetleCatch: 'Ready!', dailyCheese: '6h 34m', huntCooldown: 'Ready!' },
+  lastFullScan: 1712945000000,  // timestamp
+  lastPassiveScan: 1712945030000,
+  autoClaim: true,
+  autoHunt: true,
+  panelOpen: true,
+  level: 67,
+  strategy: 'endgame',  // 'endgame' | 'broad' | 'flowers'
+  log: ['01:24 PM Auto-claimed beetle!', ...],  // last 30 events
+  machineState: 'IDLE',        // NEW in v12
+  stateEnteredAt: 1712945000000, // NEW in v12
+  session: { claims: 0, hunts: 0, cheeseClaims: 0, cheeseGained: 0, gains: [], totalXP: 0, startTime: ... }
+}
+```
+
+### Item Key Format
+
+All items are normalized to snake_case keys via `norm()`. Examples: `green`, `ladybug`, `pollen_bronze`, `hammer_t4`, `junk_cube_t1`. The `ITEM_ALIASES` map handles variations (e.g., `green_beetle` → `green`, `tin_hammer` → `hammer_t1`).
+
+### Token Groups
+
+Some recipe inputs use wildcard tokens: `any_junk`, `any_tin_flower`, `any_bronze_beetle`, etc. The `TOKEN_GROUPS` map resolves these to arrays of specific item keys.
+
+## Game DOM Selectors (as of April 2026)
+
+| Purpose | Selector |
+|---------|----------|
+| Catch timer nav | `.beetle-game-nav .info` |
+| Cheese timer nav | `.cheese-claim-nav .info` |
+| Claim button | `.beetle-catch-module__catch-button` |
+| Hunt button | `.beetle-catch-module__hunt-button` |
+| Hunt cost/cooldown | `.beetle-catch-module__hunt-button-cheese-cost` |
+| Cooldown timer | `.beetle-catch-module__cooldown-timer` |
+| Daily cheese button | `.claim-button` |
+| Inventory items (crafting) | `.crafting-module__inventory-grid .crafting-module__beetle-item` |
+| Inventory items (catch) | `.beetle-catch-module__beetle-item` |
+| Item image | `.crafting-module__beetle-img` / `.beetle-catch-module__beetle-img` |
+| Item count | `.crafting-module__beetle-item-count` / `.beetle-catch-module__beetle-item-count` |
+| Pagination | `.crafting-module__pagination-button` / `.beetle-catch-module__pagination-button` |
+| Hammer slots | `.crafting-module__hammer-row .crafting-module__hammer-slot` |
+| Level display | `.beetle-card__level` |
+| Logged-out indicator | Text "SIGN IN or register" + no `.beetle-game-nav .info` |
+| OIDC auth page | URL contains `/oidc/` + `/openid-connect` |
+| Auth portal | Body text contains "AUTHENTICATION PORTAL" |
+| Login form | `input[name="username"]` + `input[type="password"]` on OIDC page |
+
+## User Preferences (from conversation history)
+
+- **C:\BeetleCoach is production.** Never overwrite from Z:\ backup.
+- User wants **terse responses**, no trailing summaries.
+- User gets frustrated by **regressions** — every fix must not break existing functionality.
+- User regularly shares code with **ChatGPT for second opinions** — code should be readable and well-structured.
+- **Auto-claim and auto-hunt should both default to ON.**
+- The script must work unattended for hours (RDP sessions).
+- User's account: `sails` / `~sailboatships`, level 67, 15,577 cheese, Adamantine Hammer.
+
+## Testing Checklist
+
+1. Load script on `remilia.net/home?cartridge=beetle`
+2. Verify panel renders with version 12.0.0
+3. Verify Claim ON / Hunt ON by default
+4. Wait for Beetle Catch "ready" → confirm auto-claim fires
+5. Confirm auto-hunt fires when cheese sufficient and no cooldown
+6. Wait for Daily Cheese "ready" → confirm navigation to cheese cartridge and click
+7. Log out manually → confirm 3-screen auto-login completes
+8. Trigger PROCESSING state → confirm stuck recovery kicks in
+9. Verify inventory scan captures items correctly (check console for snapshot)
+10. Verify no JS errors in console related to BeetleCoach
