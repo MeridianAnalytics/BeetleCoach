@@ -33,12 +33,13 @@
   var STALE_MS = 120000;
   var HUNT_COST = 20;
   var MIN_CHEESE = 100;
-  var TICK_MS = 5000;
+  var TICK_MS = 10000;        // 10s between ticks — app dislikes rapid polling
+  var HUNT_DEBOUNCE = 8000;   // 8s between hunt clicks
   var ACTION_TIMEOUT = 30000;
   var LOGIN_COOLDOWN = 15000;
   var LOGIN_MAX = 10;
   var NAV_COOLDOWN = 60000;
-  var BOOT_GRACE = 8000;
+  var BOOT_GRACE = 10000;     // 10s grace before any navigation
   var LOG_THROTTLE = 30000;
 
   /* ═══════════════════════════════════════════════════════
@@ -518,7 +519,7 @@
   /* ═══════════════════════════════════════════════════════
      7. ACTIONS
      ═══════════════════════════════════════════════════════ */
-  var _navBlockedUntil = 0, _bootTime = Date.now(), _lastHuntScan = 0;
+  var _navBlockedUntil = 0, _bootTime = Date.now(), _lastHuntScan = 0, _lastHuntClick = 0;
   function authBlockReason() { var t = bodyText(); if (/oidc-spa:\s*for security reasons/i.test(t) || /auth response/i.test(t)) return 'auth'; if (/sign in\s*or\s*register/i.test(t)) return 'signed-out'; if (/\bsign in\b/i.test(t) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) return 'signed-out'; return null; }
   function tabVisible() { return !document.visibilityState || document.visibilityState === 'visible'; }
   function gameReady() { return !authBlockReason() && !!document.querySelector('#root, #app, .navbar-content, header, nav'); }
@@ -547,11 +548,20 @@
   }
   var ACTIONS = {
     claim: { name:'claim', cartridge:'beetle', needCatchView:true, selectors:['.beetle-catch-module__catch-button'],
-      guards:function() { if (!S.autoClaim) return false; var nav = document.querySelector('.beetle-game-nav .info'); return nav && /ready/i.test(nav.textContent); },
+      guards:function() { if (!S.autoClaim) return false; if (currentCartridge() !== 'beetle') return false; var nav = document.querySelector('.beetle-game-nav .info'); return nav && /ready/i.test(nav.textContent); },
       onSuccess:function() { S.session.claims++; logEvent('Auto-claimed beetle!'); save(); } },
     hunt: { name:'hunt', cartridge:'beetle', needCatchView:true, selectors:['.beetle-catch-module__hunt-button'], textBlock:/cooldown/i,
-      guards:function() { if (!S.autoHunt) return false; var ch = S.mergedInventory.cheese||0; if (ch === 0) { var m = bodyText().match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i); if (m) ch = parseInt(m[1].replace(/,/g,''),10); } if (ch < HUNT_COST || ch - HUNT_COST < MIN_CHEESE) return false; var ce = firstVisible(['.beetle-catch-module__hunt-button-cheese-cost']); return !(ce && /cooldown/i.test(ce.textContent||'')); },
-      onSuccess:function() { S.session.hunts++; logEvent('Auto-hunted (-'+HUNT_COST+' cheese)'); save(); } },
+      guards:function() {
+        if (!S.autoHunt) return false;
+        if (Date.now() - _lastHuntClick < HUNT_DEBOUNCE) return false;
+        if (currentCartridge() !== 'beetle') return false;
+        var ch = S.mergedInventory.cheese||0;
+        if (ch === 0) { var m = bodyText().match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i); if (m) ch = parseInt(m[1].replace(/,/g,''),10); }
+        if (ch < HUNT_COST || ch - HUNT_COST < MIN_CHEESE) return false;
+        var ce = firstVisible(['.beetle-catch-module__hunt-button-cheese-cost']);
+        return !(ce && /cooldown/i.test(ce.textContent||''));
+      },
+      onSuccess:function() { _lastHuntClick = Date.now(); S.session.hunts++; logEvent('Auto-hunted (-'+HUNT_COST+' cheese)'); save(); } },
     cheese: { name:'daily cheese', cartridge:'cheese', selectors:['.claim-button'],
       guards:function() { var nav = document.querySelector('.cheese-claim-nav .info'); return nav && /ready/i.test(nav.textContent); },
       onSuccess:function() { S.session.cheeseClaims++; logEvent('Auto-claimed daily cheese!'); save(); } }
