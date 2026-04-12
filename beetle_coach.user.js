@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      11.5.0
+// @version      11.6.0
 // @description  BeetleBoy coach: auto-claim, smart pathways, tier labels, resilient scanning, activity log.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -25,7 +25,7 @@
   };
 
   /* ─── Config ─── */
-  const CURRENT_VER = '11.5.0';
+  const CURRENT_VER = '11.6.0';
   const OLD_STORE_KEY = 'beetle_coach_v7_store';
   const STORE_KEY = 'beetle_coach_v8_store';
   const PANEL_ID = 'bc8-panel';
@@ -37,6 +37,9 @@
   const PASSIVE_SCAN_INTERVAL = 30000; // 30s
   const TIMER_INTERVAL = 5000;
   const ACTION_INTERVAL = 10000;
+  const BOOT_NAV_DELAY = 8000;
+  const NAV_RETRY_COOLDOWN = 60000;
+  const LOG_THROTTLE_MS = 30000;
 
   /* ─── Labels ─── */
   const LABELS = {
@@ -511,6 +514,14 @@
   var _scanning = false;
   async function fullScan() {
     if (_scanning) { return; }
+    var readiness = automationReadiness();
+    if (!readiness.ok) {
+      if (readiness.cooloff) { holdNavigation(readiness.reason); }
+      else { logThrottled('scan-skip:' + readiness.reason, 'Scan skipped: ' + readiness.reason + '.', LOG_THROTTLE_MS); }
+      parseTimers(); parseLevel(); parseCraftMode();
+      renderPanel();
+      return;
+    }
     _scanning = true;
     _unresolvedCount = 0;
     var oldInv = Object.assign({}, S.mergedInventory);
@@ -1292,38 +1303,202 @@
     }, delay);
   }
 
-  // Generalized cartridge navigation — navigates once, waits for reload
+  // Conservative cartridge navigation - avoids auth/session collisions
   var _navigating = false;
-  function ensureCartridge(cartridge, reason) {
-    if (window.location.href.indexOf('cartridge=' + cartridge) > -1) {
-      _navigating = false; // We're here, clear flag
-      return true;
-    }
-    if (_navigating) { return false; }
-    _navigating = true;
-    logEvent('Navigating to ' + cartridge + ' for ' + reason + '...');
-    save();
-    window.location.href = 'https://www.remilia.net/home?cartridge=' + cartridge;
-    return false;
+  var _navStartedAt = 0;
+  var _navBlockedUntil = 0;
+  var _bootTime = Date.now();
+  var _throttledLogs = {};
+
+  function logThrottled(key, msg, windowMs) {
+    var now = Date.now();
+    var last = _throttledLogs[key] || 0;
+    if (now - last < (windowMs || LOG_THROTTLE_MS)) { return; }
+    _throttledLogs[key] = now;
+    logEvent(msg);
   }
 
   function isVisible(el) {
     return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
   }
 
+  function bodyText() {
+    return (document.body && document.body.innerText) ? document.body.innerText : '';
+  }
+
+  function currentCartridge() {
+    var m = window.location.href.match(/[?&]cartridge=([^&#]+)/i);
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  function authBlockReason() {
+    var text = bodyText();
+    if (/oidc-spa:\s*for security reasons/i.test(text) || /auth response/i.test(text)) {
+      return 'auth restoration in progress';
+    }
+    if (/sign in\s*or\s*register/i.test(text)) { return 'sign-in required'; }
+    if (/\bsign in\b/i.test(text) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) {
+      return 'sign-in required';
+    }
+    return null;
+  }
+
+  function automationReadiness() {
+    var authReason = authBlockReason();
+    if (authReason) { return {ok:false, reason:authReason, cooloff:true}; }
+    if (document.visibilityState && document.visibilityState !== 'visible') { return {ok:false, reason:'tab hidden'}; }
+    if (!document.querySelector('#root, #app, .navbar-content, header, nav')) {
+      return {ok:false, reason:'app shell loading'};
+    }
+    return {ok:true};
+  }
+
+  function navigationReadiness() {
+    var base = automationReadiness();
+    if (!base.ok) { return base; }
+    if (_navBlockedUntil && Date.now() < _navBlockedUntil) {
+      return {ok:false, reason:'navigation cooldown'};
+    }
+    if (Date.now() - _bootTime < BOOT_NAV_DELAY) {
+      return {ok:false, reason:'boot grace period'};
+    }
+    if (!document.querySelector('.navbar-content, .search-input, input[type="search"], .beetle-game-nav, .cheese-claim-nav')) {
+      return {ok:false, reason:'game nav loading'};
+    }
+    return {ok:true};
+  }
+
+  function holdNavigation(reason, ms) {
+    _navigating = false;
+    _navStartedAt = 0;
+    _navBlockedUntil = Math.max(_navBlockedUntil, Date.now() + (ms || NAV_RETRY_COOLDOWN));
+    logThrottled('nav-pause:' + reason, 'Automation paused: ' + reason + '.', LOG_THROTTLE_MS);
+  }
+
+  function clearStaleNavigation() {
+    if (_navigating && _navStartedAt && Date.now() - _navStartedAt > 10000) {
+      _navigating = false;
+      _navStartedAt = 0;
+    }
+    if (_navBlockedUntil && Date.now() >= _navBlockedUntil) {
+      _navBlockedUntil = 0;
+    }
+  }
+
+  function clickElement(el) {
+    if (!el) { return false; }
+    try { el.click(); return true; } catch (e) {}
+    try {
+      return el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+    } catch (e2) {}
+    return false;
+  }
+
+  function firstVisible(selectors) {
+    for (var si = 0; si < selectors.length; si++) {
+      var nodes = document.querySelectorAll(selectors[si]);
+      for (var ni = 0; ni < nodes.length; ni++) {
+        if (isVisible(nodes[ni])) { return nodes[ni]; }
+      }
+    }
+    return null;
+  }
+
+  function findCartridgeTarget(cartridge) {
+    if (cartridge === 'beetle') {
+      return firstVisible([
+        '.beetle-game-nav',
+        'a[href*="cartridge=beetle"]',
+        '[data-cartridge="beetle"]'
+      ]);
+    }
+    if (cartridge === 'cheese') {
+      return firstVisible([
+        '.cheese-claim-nav',
+        'a[href*="cartridge=cheese"]',
+        '[data-cartridge="cheese"]'
+      ]);
+    }
+    return null;
+  }
+
+  function ensureCartridge(cartridge, reason) {
+    clearStaleNavigation();
+    cartridge = (cartridge || '').toLowerCase();
+    var alreadyThere = currentCartridge() === cartridge;
+    var readiness = alreadyThere ? automationReadiness() : navigationReadiness();
+    if (!readiness.ok) {
+      if (readiness.cooloff) { holdNavigation(readiness.reason); }
+      else { logThrottled('nav-skip:' + cartridge + ':' + readiness.reason, 'Navigation skipped for ' + reason + ': ' + readiness.reason + '.', LOG_THROTTLE_MS); }
+      return false;
+    }
+    if (alreadyThere) {
+      _navigating = false;
+      _navStartedAt = 0;
+      return true;
+    }
+    if (_navigating) { return false; }
+
+    var target = findCartridgeTarget(cartridge);
+    _navigating = true;
+    _navStartedAt = Date.now();
+    if (target && clickElement(target)) {
+      logEvent('Switching to ' + cartridge + ' for ' + reason + '...');
+      save();
+      return false;
+    }
+
+    logEvent('Navigating to ' + cartridge + ' for ' + reason + '...');
+    save();
+    window.location.assign('https://www.remilia.net/home?cartridge=' + cartridge);
+    return false;
+  }
+
   function preferCatchView(reason) {
-    var catchModule = document.querySelector('.beetle-catch-module');
-    var catchBtn = document.querySelector('.beetle-catch-module__catch-button');
-    var huntBtn = document.querySelector('.beetle-catch-module__hunt-button');
-    if (isVisible(catchBtn) || isVisible(huntBtn) || isVisible(catchModule)) { return false; }
-    var nav = document.querySelector('.beetle-game-nav');
+    var catchBtn = firstVisible(['.beetle-catch-module__catch-button']);
+    var huntBtn = firstVisible(['.beetle-catch-module__hunt-button']);
+    var catchModule = firstVisible(['.beetle-catch-module']);
+    if (catchBtn || huntBtn || catchModule) { return false; }
+    var nav = firstVisible(['.beetle-game-nav']);
     if (!nav) { return false; }
-    logEvent('Switching to Beetle Catch for ' + reason + '...');
-    nav.click();
+    var readiness = automationReadiness();
+    if (!readiness.ok) {
+      if (readiness.cooloff) { holdNavigation(readiness.reason); }
+      else { logThrottled('catch-skip:' + readiness.reason, 'Catch view skipped: ' + readiness.reason + '.', LOG_THROTTLE_MS); }
+      return false;
+    }
+    logThrottled('catch-switch:' + reason, 'Switching to Beetle Catch for ' + reason + '...', 5000);
+    clickElement(nav);
     return true;
   }
 
+  function ensureBeetleActionSurface(reason) {
+    if (!ensureCartridge('beetle', reason)) { return false; }
+    if (preferCatchView(reason)) { return false; }
+    return true;
+  }
+
+  var _lastSignInAttempt = 0;
   function runPriorityActions() {
+    var readiness = automationReadiness();
+    if (!readiness.ok) {
+      // Auto-click SIGN IN if logged out and creds are pre-populated
+      if (readiness.reason === 'sign-in required' && Date.now() - _lastSignInAttempt > 30000) {
+        var signInEl = null;
+        document.querySelectorAll('*').forEach(function(el) {
+          if (!signInEl && el.textContent.trim() === 'SIGN IN' && el.children.length <= 1) { signInEl = el; }
+        });
+        if (signInEl) {
+          _lastSignInAttempt = Date.now();
+          logEvent('Auto-clicking SIGN IN...');
+          signInEl.click();
+          return true;
+        }
+      }
+      if (readiness.cooloff) { holdNavigation(readiness.reason); }
+      else { logThrottled('automation-pause:' + readiness.reason, 'Automation paused: ' + readiness.reason + '.', LOG_THROTTLE_MS); }
+      return true;
+    }
     if (checkStuckState()) { return true; }
     if (tryAutoClaim()) { return true; }
     if (tryAutoHunt()) { return true; }
@@ -1409,7 +1584,7 @@
         S.stuckRefreshCount = 0;
         logEvent('Auto-recovering: hard navigation reset');
         save();
-        window.location.href = 'https://www.remilia.net/home?cartridge=beetle';
+        ensureCartridge('beetle', 'stuck recovery');
         return true;
       }
       return true; // Still stuck, skip actions this cycle
@@ -1427,79 +1602,114 @@
     return false;
   }
 
-  // Returns true if action was taken (caller should stop processing other actions)
+  function normalizeText(text) {
+    return (text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isEnabledButton(btn) {
+    return !!(btn && isVisible(btn) && !btn.disabled && !btn.classList.contains('disabled') && btn.getAttribute('aria-disabled') !== 'true');
+  }
+
+  function findActionButton(selectors) {
+    var btn = firstVisible(selectors);
+    return isEnabledButton(btn) ? btn : null;
+  }
+
+  function safeClick(btn) {
+    if (!btn) { return false; }
+    try { btn.click(); return true; } catch (e) {}
+    try {
+      btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      return true;
+    } catch (e2) {}
+    return false;
+  }
+
+  // Returns true if an action fired OR if this cycle is intentionally blocked while preparing the surface.
   function tryAutoClaim() {
     if (!S.autoClaim || _scanning) { return false; }
     if (Date.now() - _lastClaimTime < 30000) { return false; }
-    // Check nav bar — is claim ready?
     var navBC = document.querySelector('.beetle-game-nav .info');
     if (!navBC || !/ready/i.test(navBC.textContent)) { return false; }
-    // Navigate to beetle cartridge
-    if (!ensureCartridge('beetle', 'claim')) { return true; }
-    // NOTE: Clicking claim/hunt buttons auto-loads the cartridge even when "disconnected"
-    // So we only check for .disabled class (on cooldown), NOT .disconnected
-    var btn = document.querySelector('.beetle-catch-module__catch-button:not(.disabled)');
-    if (btn) {
-      var btnText = btn.textContent || '';
-      if (/\d+[mhMs]\s/i.test(btnText) || /PROCESSING/i.test(btnText)) { return false; }
-      btn.click(); _lastClaimTime = Date.now();
-      S.session.claims++;
-      logEvent('Auto-claimed beetle!');
-      save();
-      postActionRefresh('Post-claim', 10000);
+    if (!ensureBeetleActionSurface('claim')) { return true; }
+    var btn = findActionButton(['.beetle-catch-module__catch-button']);
+    if (!btn) {
+      logThrottled('claim-missing', 'Claim ready but button not available yet.', LOG_THROTTLE_MS);
       return true;
     }
-    return false;
+    var btnText = normalizeText(btn.textContent);
+    if (/\bprocessing\b/i.test(btnText) || /\bloading\b/i.test(btnText) || /\d+\s*[smhd]/i.test(btnText)) {
+      logThrottled('claim-waiting', 'Claim ready but button is still settling.', LOG_THROTTLE_MS);
+      return true;
+    }
+    if (!safeClick(btn)) {
+      logThrottled('claim-click-failed', 'Claim click failed; retrying next cycle.', LOG_THROTTLE_MS);
+      return true;
+    }
+    _lastClaimTime = Date.now();
+    S.session.claims++;
+    logEvent('Auto-claimed beetle!');
+    save();
+    postActionRefresh('Post-claim', 10000);
+    return true;
   }
+
   function tryAutoHunt() {
     if (!S.autoHunt || _scanning) { return false; }
-    // Check cheese — use inventory OR fall back to DOM text
     var cheese = S.mergedInventory.cheese || 0;
     if (cheese === 0) {
-      // Try reading cheese from DOM directly
-      var cheeseDom = document.body.innerText.match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i);
+      var cheeseDom = bodyText().match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i);
       if (cheeseDom) { cheese = parseInt(cheeseDom[1].replace(/,/g, ''), 10); }
     }
     if (cheese < HUNT_COST) { return false; }
     if (cheese - HUNT_COST < MIN_CHEESE_RESERVE) { return false; }
     if (Date.now() - _lastHuntTime < 15000) { return false; }
-    // Check cooldown from button text
-    var huntCostEl = document.querySelector('.beetle-catch-module__hunt-button-cheese-cost');
-    if (huntCostEl && /cooldown/i.test(huntCostEl.textContent)) { return false; }
-    // Navigate to beetle cartridge if needed
-    if (!ensureCartridge('beetle', 'hunt')) { return true; }
-    // Click — works even when disconnected, auto-loads cartridge
-    var btn = document.querySelector('.beetle-catch-module__hunt-button:not(.disabled)');
-    if (btn) {
-      var btnText = btn.textContent || '';
-      if (/cooldown/i.test(btnText) || /PROCESSING/i.test(btnText)) { return false; }
-      btn.click(); _lastHuntTime = Date.now();
-      S.session.hunts++;
-      logEvent('Auto-hunted (-' + HUNT_COST + ' cheese)');
-      save();
-      postActionRefresh('Post-hunt', 8000);
+    if (!ensureBeetleActionSurface('hunt')) { return true; }
+    var huntCostEl = firstVisible(['.beetle-catch-module__hunt-button-cheese-cost']);
+    if (huntCostEl && /cooldown/i.test(huntCostEl.textContent || '')) { return false; }
+    var btn = findActionButton(['.beetle-catch-module__hunt-button']);
+    if (!btn) {
+      logThrottled('hunt-missing', 'Hunt ready but button not available yet.', LOG_THROTTLE_MS);
       return true;
     }
-    return false;
+    var btnText = normalizeText(btn.textContent);
+    if (/\bcooldown\b/i.test(btnText) || /\bprocessing\b/i.test(btnText) || /\bloading\b/i.test(btnText) || /\d+\s*[smhd]/i.test(btnText)) {
+      logThrottled('hunt-waiting', 'Hunt ready but button is still settling.', LOG_THROTTLE_MS);
+      return true;
+    }
+    if (!safeClick(btn)) {
+      logThrottled('hunt-click-failed', 'Hunt click failed; retrying next cycle.', LOG_THROTTLE_MS);
+      return true;
+    }
+    _lastHuntTime = Date.now();
+    S.session.hunts++;
+    logEvent('Auto-hunted (-' + HUNT_COST + ' cheese)');
+    save();
+    postActionRefresh('Post-hunt', 8000);
+    return true;
   }
+
   function tryClaimCheese() {
     if (_scanning) { return false; }
     if (Date.now() - _lastCheeseTime < 60000) { return false; }
-    // Check nav bar — is cheese ready?
     var navCheese = document.querySelector('.cheese-claim-nav .info');
     if (!navCheese || !/ready/i.test(navCheese.textContent)) { return false; }
-    // Navigate to cheese cartridge
     if (!ensureCartridge('cheese', 'daily cheese')) { return true; }
-    var btn = document.querySelector('.claim-button:not(.disabled)');
-    if (btn) {
-      btn.click(); _lastCheeseTime = Date.now();
-      S.session.cheeseClaims++;
-      logEvent('Auto-claimed daily cheese!');
-      save();
-      postActionRefresh('Post-cheese', 8000);
+    var btn = findActionButton(['.claim-button']);
+    if (!btn) {
+      logThrottled('cheese-missing', 'Daily cheese ready but button not available yet.', LOG_THROTTLE_MS);
       return true;
     }
-    return false;
+    if (!safeClick(btn)) {
+      logThrottled('cheese-click-failed', 'Daily cheese click failed; retrying next cycle.', LOG_THROTTLE_MS);
+      return true;
+    }
+    _lastCheeseTime = Date.now();
+    S.session.cheeseClaims++;
+    logEvent('Auto-claimed daily cheese!');
+    save();
+    postActionRefresh('Post-cheese', 8000);
+    return true;
   }
 
   /* ─── FIX 5 + 6 + 7: Styles with status strip, freshness chip, timer badges, hammer honesty ─── */
@@ -1832,19 +2042,28 @@
   /* ─── Boot ─── */
   var _booted = false;
   var _intervals = [];
+  var _startupRetryTimer = null;
   function boot() {
     if (_booted) { return; }
     _booted = true;
+    _bootTime = Date.now();
     _intervals.forEach(function(id) { clearInterval(id); });
     _intervals = [];
     _navigating = false; // Reset nav flag on boot
     ensureUI();
     kickoffPriorityScan('startup');
+    if (_startupRetryTimer) { clearTimeout(_startupRetryTimer); }
+    _startupRetryTimer = setTimeout(function() {
+      _startupRetryTimer = null;
+      if (!S.lastFullScan || isStale() || Date.now() - S.lastFullScan > 15000) {
+        kickoffPriorityScan('startup retry');
+      }
+    }, BOOT_NAV_DELAY + 1000);
     _intervals.push(setInterval(refreshTimers, TIMER_INTERVAL));
     _intervals.push(setInterval(passiveScan, PASSIVE_SCAN_INTERVAL));
     // Only fire ONE action per cycle, and always prioritize claim/hunt over scans
     _intervals.push(setInterval(runPriorityActions, ACTION_INTERVAL));
-    console.log('[BeetleCoach v11.5] booted');
+    console.log('[BeetleCoach v11.6] booted');
   }
   function safeBoot() { try { boot(); } catch(e) { console.warn('[BC] boot fail', e); } }
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
