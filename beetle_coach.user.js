@@ -568,7 +568,17 @@
       var pass = document.querySelector('input[name="password"], input[type="password"]');
       var submit = document.querySelector('input[type="submit"], button[type="submit"]');
       if (!submit) { var btns = document.querySelectorAll('button, input[type="button"], a'); for (var i = 0; i < btns.length; i++) if (/^\s*sign\s*in\s*$/i.test(btns[i].textContent.trim())) { submit = btns[i]; break; } }
-      if (email && pass && submit) { if (email.value && pass.value) return {screen:3,el:submit,desc:'Sign In (creds pre-filled)'}; return {screen:3,el:null,desc:'Creds not pre-filled'}; }
+      if (email && pass && submit) {
+        // Browser autofill often shows values visually but leaves .value empty in JS.
+        // Trigger autofill population by focusing the fields, then click submit regardless.
+        if (!email.value) { email.focus(); email.dispatchEvent(new Event('input',{bubbles:true})); email.dispatchEvent(new Event('change',{bubbles:true})); }
+        if (!pass.value) { pass.focus(); pass.dispatchEvent(new Event('input',{bubbles:true})); pass.dispatchEvent(new Event('change',{bubbles:true})); }
+        // If still empty after focus tricks, check for autofill visual indicators
+        var hasAutofill = email.matches && (email.matches(':-webkit-autofill') || pass.matches(':-webkit-autofill'));
+        if (email.value || pass.value || hasAutofill) return {screen:3,el:submit,desc:'Sign In (creds detected)'};
+        // Last resort: if form exists with both fields and a submit, just try clicking it
+        return {screen:3,el:submit,desc:'Sign In (forcing submit)'};
+      }
       if (/AUTHENTICATION\s*PORTAL/i.test(body)) { var pb = document.querySelectorAll('button, a, div[role="button"]'); for (var j = 0; j < pb.length; j++) if (/^\s*SIGN\s*IN\s*$/i.test(pb[j].textContent.trim()) && !/NEW/i.test(pb[j].textContent)) return {screen:2,el:pb[j],desc:'Auth Portal SIGN IN'}; }
       return {screen:0,el:null,desc:'OIDC page, nothing actionable'};
     }
@@ -583,7 +593,7 @@
   function tryAutoLogin() {
     if (Date.now() - _lastLoginTime < LOGIN_COOLDOWN) return false;
     if (_loginAttempts >= LOGIN_MAX) { logThrottled('login-max','Auto-login gave up after '+LOGIN_MAX+' attempts.',120000); return false; }
-    var s = detectLoginScreen(); if (!s.el) { if (s.screen === 3) logThrottled('login-nocreds','Login form: creds not pre-filled.',60000); return false; }
+    var s = detectLoginScreen(); if (!s.el) return false;
     _lastLoginTime = Date.now(); _loginAttempts++;
     logEvent('Auto-login '+s.screen+'/3: '+s.desc); save(); safeClick(s.el); return true;
   }
