@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.0.0
+// @version      12.1.0
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -25,7 +25,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.0.0';
+  var VER = '12.1.0';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -290,19 +290,46 @@
   /* ═══════════════════════════════════════════════════════
      4. STATE MANAGEMENT
      ═══════════════════════════════════════════════════════ */
+  function defaultSession() {
+    return {claims:0, hunts:0, cheeseClaims:0, cheeseGained:0, gains:[], totalXP:0, startTime:Date.now()};
+  }
   function defaults() {
     return { ver:VER, mergedInventory:{}, currentHammer:null, ownedHammers:[], brokenHammers:[], discoveredHammers:[],
       currentHammerBonus:null, currentHammerBreakChance:null, timers:{}, lastFullScan:0, lastPassiveScan:0,
       autoClaim:true, autoHunt:true, panelOpen:true, level:null, craftMode:null, strategy:'endgame',
       log:[], machineState:'BOOTING', stateEnteredAt:Date.now(),
-      session:{claims:0, hunts:0, cheeseClaims:0, cheeseGained:0, gains:[], totalXP:0, startTime:Date.now()} };
+      session:defaultSession() };
+  }
+  function normalizeSession(rawSession) {
+    var session = Object.assign(defaultSession(), rawSession || {});
+    var gains = [];
+    if (Array.isArray(session.gains)) {
+      gains = session.gains.slice();
+    } else if (session.gains && typeof session.gains === 'object') {
+      Object.keys(session.gains).forEach(function(name) {
+        var count = parseInt(session.gains[name], 10) || 0;
+        for (var i = 0; i < count; i++) gains.push(name);
+      });
+    } else if (Array.isArray(session.beetles)) {
+      gains = session.beetles.slice();
+    }
+    session.claims = parseInt(session.claims, 10) || 0;
+    session.hunts = parseInt(session.hunts, 10) || 0;
+    session.cheeseClaims = parseInt(session.cheeseClaims, 10) || 0;
+    session.cheeseGained = parseInt(session.cheeseGained, 10) || 0;
+    session.totalXP = parseInt(session.totalXP, 10) || 0;
+    if (!session.startTime || !isFinite(session.startTime)) session.startTime = Date.now();
+    session.gains = gains;
+    return session;
   }
   function load() {
     try {
       var raw = GM_getValue(STORE_KEY, null);
       if (!raw) return defaults();
-      var p = Object.assign(defaults(), JSON.parse(raw));
-      if ((p.ver||'0').split('.')[0] !== VER.split('.')[0]) { p.mergedInventory = {}; p.log = []; p.session = defaults().session; }
+      var parsed = JSON.parse(raw);
+      var p = Object.assign(defaults(), parsed);
+      p.session = normalizeSession((parsed || {}).session);
+      if ((p.ver||'0').split('.')[0] !== VER.split('.')[0]) { p.mergedInventory = {}; p.log = []; p.session = defaultSession(); }
       p.ver = VER; p.machineState = 'BOOTING'; p.stateEnteredAt = Date.now();
       return p;
     } catch(e) { return defaults(); }
@@ -341,7 +368,7 @@
 
   var _scanning = false;
   async function fullScan() {
-    if (_scanning) return;
+    if (_scanning || !tabVisible()) return;
     _scanning = true; var totalUnresolved = 0, oldInv = Object.assign({}, S.mergedInventory);
     try {
       var merged = {};
@@ -412,7 +439,29 @@
     var st = S.currentHammer ? HAMMER_STATS[S.currentHammer] : null;
     S.currentHammerBonus = st ? st.bonus : null; S.currentHammerBreakChance = st ? st.baseBreak : null;
   }
-  function parseLevel() { var el = document.querySelector('.beetle-card__level'); if (el) { var m = el.textContent.match(/(\d+)/); if (m) { var lv = parseInt(m[1],10); if (S.level && lv > S.level) logEvent('LEVEL UP! '+S.level+' -> '+lv); S.level = lv; } } }
+  function parseLevel() {
+    var el = document.querySelector('.beetle-card__level');
+    if (el) {
+      var m = el.textContent.match(/(\d+)/);
+      if (m) {
+        var lv = parseInt(m[1],10);
+        if (S.level && lv > S.level) logEvent('LEVEL UP! '+S.level+' -> '+lv);
+        S.level = lv;
+      }
+    }
+    var posts = document.querySelectorAll('.postBody');
+    var xpValues = [];
+    posts.forEach(function(p) {
+      var xpM = (p.textContent || '').match(/\+(\d+)\s*XP/i);
+      if (xpM) xpValues.push(parseInt(xpM[1], 10));
+    });
+    if (!S._xpPostsSeen) S._xpPostsSeen = 0;
+    if (xpValues.length > S._xpPostsSeen) {
+      if (!S.session.totalXP) S.session.totalXP = 0;
+      S.session.totalXP += xpValues.slice(S._xpPostsSeen).reduce(function(sum, xp) { return sum + xp; }, 0);
+      S._xpPostsSeen = xpValues.length;
+    }
+  }
   function parseCraftMode() { var cm = document.querySelector('.crafting-module'); S.craftMode = cm ? (cm.classList.contains('crafting-module--smash') ? 'Smash' : 'Assemble') : null; }
   function isFresh() { return Date.now() - (S.lastPassiveScan||0) < STALE_MS || Date.now() - (S.lastFullScan||0) < STALE_MS; }
 
@@ -471,8 +520,9 @@
      ═══════════════════════════════════════════════════════ */
   var _navBlockedUntil = 0, _bootTime = Date.now();
   function authBlockReason() { var t = bodyText(); if (/oidc-spa:\s*for security reasons/i.test(t) || /auth response/i.test(t)) return 'auth'; if (/sign in\s*or\s*register/i.test(t)) return 'signed-out'; if (/\bsign in\b/i.test(t) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) return 'signed-out'; return null; }
-  function gameReady() { return !authBlockReason() && !(document.visibilityState && document.visibilityState !== 'visible') && !!document.querySelector('#root, #app, .navbar-content, header, nav'); }
-  function navReady() { return gameReady() && !(_navBlockedUntil && Date.now() < _navBlockedUntil) && Date.now() - _bootTime >= BOOT_GRACE && !!document.querySelector('.navbar-content, .search-input, .beetle-game-nav, .cheese-claim-nav'); }
+  function tabVisible() { return !document.visibilityState || document.visibilityState === 'visible'; }
+  function gameReady() { return !authBlockReason() && !!document.querySelector('#root, #app, .navbar-content, header, nav'); }
+  function navReady() { return gameReady() && tabVisible() && !(_navBlockedUntil && Date.now() < _navBlockedUntil) && Date.now() - _bootTime >= BOOT_GRACE && !!document.querySelector('.navbar-content, .search-input, .beetle-game-nav, .cheese-claim-nav'); }
 
   function ensureCartridge(cart, reason) {
     cart = (cart||'').toLowerCase(); if (currentCartridge() === cart) return true; if (!navReady()) return false;
@@ -579,13 +629,16 @@
     if (!gameReady()) { transition(authBlockReason() ? 'LOGGED_OUT' : 'BOOTING'); return; }
     var cb = document.querySelector('.beetle-catch-module__catch-button'), hb = document.querySelector('.beetle-catch-module__hunt-button');
     if ((cb && (cb.classList.contains('loading') || /PROCESSING/i.test(cb.textContent))) || (hb && (hb.classList.contains('loading') || /PROCESSING/i.test(hb.textContent)))) { logEvent('Buttons stuck on PROCESSING...'); transition('STUCK'); return; }
-    if (Date.now() - (S.lastPassiveScan||0) > 30000) passiveScan();
+    // Passive scan only when tab visible (needs DOM rendering)
+    if (tabVisible() && Date.now() - (S.lastPassiveScan||0) > 30000) passiveScan();
+    // Actions run even in background tabs
     var r;
     r = executeAction(ACTIONS.claim); if (r === 'fired') { transition('CLAIMING'); schedulePostAction(); return; } if (r === 'navigating') return; if (r === 'stuck') { transition('STUCK'); return; }
     r = executeAction(ACTIONS.hunt); if (r === 'fired') { transition('HUNTING'); schedulePostAction(); return; } if (r === 'navigating') return; if (r === 'stuck') { transition('STUCK'); return; }
     r = executeAction(ACTIONS.cheese); if (r === 'fired') { transition('CLAIMING_CHEESE'); schedulePostAction(); return; } if (r === 'navigating') return;
-    if (!_scanning && Date.now() - (S.lastFullScan||0) > STALE_MS && ensureCartridge('beetle','scan')) { transition('SCANNING'); fullScan().then(function() { transition('IDLE'); }); }
-    renderPanel();
+    // Full scan only when tab visible
+    if (tabVisible() && !_scanning && Date.now() - (S.lastFullScan||0) > STALE_MS && ensureCartridge('beetle','scan')) { transition('SCANNING'); fullScan().then(function() { transition('IDLE'); }); }
+    if (tabVisible()) renderPanel();
   }
   var _postTimer = null;
   function schedulePostAction() {
