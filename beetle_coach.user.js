@@ -518,7 +518,7 @@
   /* ═══════════════════════════════════════════════════════
      7. ACTIONS
      ═══════════════════════════════════════════════════════ */
-  var _navBlockedUntil = 0, _bootTime = Date.now();
+  var _navBlockedUntil = 0, _bootTime = Date.now(), _lastHuntScan = 0;
   function authBlockReason() { var t = bodyText(); if (/oidc-spa:\s*for security reasons/i.test(t) || /auth response/i.test(t)) return 'auth'; if (/sign in\s*or\s*register/i.test(t)) return 'signed-out'; if (/\bsign in\b/i.test(t) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) return 'signed-out'; return null; }
   function tabVisible() { return !document.visibilityState || document.visibilityState === 'visible'; }
   function gameReady() { return !authBlockReason() && !!document.querySelector('#root, #app, .navbar-content, header, nav'); }
@@ -644,7 +644,12 @@
     // Actions run even in background tabs
     var r;
     r = executeAction(ACTIONS.claim); if (r === 'fired') { transition('CLAIMING'); schedulePostAction(); return; } if (r === 'navigating') return; if (r === 'stuck') { transition('STUCK'); return; }
-    r = executeAction(ACTIONS.hunt); if (r === 'fired') { transition('HUNTING'); schedulePostAction(); return; } if (r === 'navigating') return; if (r === 'stuck') { transition('STUCK'); return; }
+    // Hunts fire rapidly — game allows multiple before cooldown. Stay in IDLE, next tick retries.
+    r = executeAction(ACTIONS.hunt);
+    if (r === 'fired') { _lastHuntScan = Date.now(); return; }
+    if (r === 'navigating') return; if (r === 'stuck') { transition('STUCK'); return; }
+    // If hunts were firing recently and stopped (cooldown kicked in), do a post-hunt scan
+    if (_lastHuntScan && Date.now() - _lastHuntScan > 15000) { _lastHuntScan = 0; schedulePostAction(); }
     r = executeAction(ACTIONS.cheese); if (r === 'fired') { transition('CLAIMING_CHEESE'); schedulePostAction(); return; } if (r === 'navigating') return;
     // Full scan only when tab visible
     if (tabVisible() && !_scanning && Date.now() - (S.lastFullScan||0) > STALE_MS && ensureCartridge('beetle','scan')) { transition('SCANNING'); fullScan().then(function() { transition('IDLE'); }); }
