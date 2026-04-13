@@ -549,7 +549,7 @@
   var ACTIONS = {
     claim: { name:'claim', cartridge:'beetle', needCatchView:true, selectors:['.beetle-catch-module__catch-button'],
       guards:function() { if (!S.autoClaim) return false; if (currentCartridge() !== 'beetle') return false; var nav = document.querySelector('.beetle-game-nav .info'); return nav && /ready/i.test(nav.textContent); },
-      onSuccess:function() { S.session.claims++; logEvent('Auto-claimed beetle!'); save(); } },
+      onSuccess:function() { _lastActionTime = Date.now(); S.session.claims++; logEvent('Auto-claimed beetle!'); save(); } },
     hunt: { name:'hunt', cartridge:'beetle', needCatchView:true, selectors:['.beetle-catch-module__hunt-button'], textBlock:/cooldown/i,
       guards:function() {
         if (!S.autoHunt) return false;
@@ -561,10 +561,10 @@
         var ce = firstVisible(['.beetle-catch-module__hunt-button-cheese-cost']);
         return !(ce && /cooldown/i.test(ce.textContent||''));
       },
-      onSuccess:function() { _lastHuntClick = Date.now(); S.session.hunts++; logEvent('Auto-hunted (-'+HUNT_COST+' cheese)'); save(); } },
+      onSuccess:function() { _lastHuntClick = Date.now(); _lastActionTime = Date.now(); S.session.hunts++; logEvent('Auto-hunted (-'+HUNT_COST+' cheese)'); save(); } },
     cheese: { name:'daily cheese', cartridge:'cheese', selectors:['.claim-button'],
       guards:function() { var nav = document.querySelector('.cheese-claim-nav .info'); return nav && /ready/i.test(nav.textContent); },
-      onSuccess:function() { S.session.cheeseClaims++; logEvent('Auto-claimed daily cheese!'); save(); } }
+      onSuccess:function() { _lastActionTime = Date.now(); S.session.cheeseClaims++; logEvent('Auto-claimed daily cheese!'); save(); } }
   };
 
   /* ═══════════════════════════════════════════════════════
@@ -650,10 +650,15 @@
     if (authBlockReason() && stateAge() > LOGIN_COOLDOWN) { transition('LOGGED_OUT'); return; }
     if (stateAge() > 30000) transition('BOOTING');
   }
+  var _lastActionTime = 0;
   function handleIdle() {
     if (!gameReady()) { transition(authBlockReason() ? 'LOGGED_OUT' : 'BOOTING'); return; }
-    var cb = document.querySelector('.beetle-catch-module__catch-button'), hb = document.querySelector('.beetle-catch-module__hunt-button');
-    if ((cb && (cb.classList.contains('loading') || /PROCESSING/i.test(cb.textContent))) || (hb && (hb.classList.contains('loading') || /PROCESSING/i.test(hb.textContent)))) { logEvent('Buttons stuck on PROCESSING...'); transition('STUCK'); return; }
+    // PROCESSING detection — but NOT within 20s of a hunt/claim (buttons briefly show PROCESSING after click, that's normal)
+    var sinceAction = Date.now() - _lastActionTime;
+    if (sinceAction > 20000) {
+      var cb = document.querySelector('.beetle-catch-module__catch-button'), hb = document.querySelector('.beetle-catch-module__hunt-button');
+      if ((cb && (cb.classList.contains('loading') || /PROCESSING/i.test(cb.textContent))) || (hb && (hb.classList.contains('loading') || /PROCESSING/i.test(hb.textContent)))) { logEvent('Buttons stuck on PROCESSING...'); transition('STUCK'); return; }
+    }
     // Passive scan only when tab visible (needs DOM rendering)
     if (tabVisible() && Date.now() - (S.lastPassiveScan||0) > 30000) passiveScan();
     // Actions run even in background tabs
