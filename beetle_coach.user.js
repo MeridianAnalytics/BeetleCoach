@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.1.0
+// @version      12.2.0
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -25,7 +25,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.1.0';
+  var VER = '12.2.0';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -33,8 +33,7 @@
   var STALE_MS = 120000;
   var HUNT_COST = 20;
   var MIN_CHEESE = 100;
-  var TICK_MS = 10000;        // 10s between ticks — app dislikes rapid polling
-  var HUNT_DEBOUNCE = 3000;   // 3s between hunt clicks — game allows rapid hunts
+  var TICK_MS = 10000;        // 10s between ticks
   var ACTION_TIMEOUT = 30000;
   var LOGIN_COOLDOWN = 15000;
   var LOGIN_MAX = 10;
@@ -298,7 +297,7 @@
     return { ver:VER, mergedInventory:{}, currentHammer:null, ownedHammers:[], brokenHammers:[], discoveredHammers:[],
       currentHammerBonus:null, currentHammerBreakChance:null, timers:{}, lastFullScan:0, lastPassiveScan:0,
       autoClaim:true, autoHunt:true, panelOpen:true, level:null, craftMode:null, strategy:'endgame',
-      log:[], machineState:'BOOTING', stateEnteredAt:Date.now(),
+      log:[], machineState:'BOOTING', stateEnteredAt:Date.now(), lastActionAt:0, stuckReloads:0,
       session:defaultSession() };
   }
   function normalizeSession(rawSession) {
@@ -519,53 +518,64 @@
   /* ═══════════════════════════════════════════════════════
      7. ACTIONS
      ═══════════════════════════════════════════════════════ */
-  var _navBlockedUntil = 0, _bootTime = Date.now(), _lastHuntScan = 0, _lastHuntClick = 0;
+  var _navBlockedUntil = 0, _bootTime = Date.now();
   function authBlockReason() { var t = bodyText(); if (/oidc-spa:\s*for security reasons/i.test(t) || /auth response/i.test(t)) return 'auth'; if (/sign in\s*or\s*register/i.test(t)) return 'signed-out'; if (/\bsign in\b/i.test(t) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) return 'signed-out'; return null; }
   function tabVisible() { return !document.visibilityState || document.visibilityState === 'visible'; }
   function gameReady() { return !authBlockReason() && !!document.querySelector('#root, #app, .navbar-content, header, nav'); }
-  function navReady() { return gameReady() && tabVisible() && !(_navBlockedUntil && Date.now() < _navBlockedUntil) && Date.now() - _bootTime >= BOOT_GRACE && !!document.querySelector('.navbar-content, .search-input, .beetle-game-nav, .cheese-claim-nav'); }
+  function onBeetle() { return currentCartridge() === 'beetle'; }
+  function navReady() { return gameReady() && !(_navBlockedUntil && Date.now() < _navBlockedUntil) && Date.now() - _bootTime >= BOOT_GRACE && !!document.querySelector('.navbar-content, .search-input, .beetle-game-nav, .cheese-claim-nav'); }
 
   function ensureCartridge(cart, reason) {
-    cart = (cart||'').toLowerCase(); if (currentCartridge() === cart) return true; if (!navReady()) return false;
+    cart = (cart||'').toLowerCase();
+    if (currentCartridge() === cart) return true;
+    if (!navReady()) return false;
     var target = cart === 'beetle' ? firstVisible(['.beetle-game-nav','a[href*="cartridge=beetle"]']) : cart === 'cheese' ? firstVisible(['.cheese-claim-nav','a[href*="cartridge=cheese"]']) : null;
     _navBlockedUntil = Date.now() + NAV_COOLDOWN;
     if (target && safeClick(target)) { logEvent('Switching to '+cart+' for '+reason); return false; }
     logEvent('Navigating to '+cart+' for '+reason); window.location.assign('https://www.remilia.net/home?cartridge='+cart); return false;
   }
-  function ensureCatchView() {
-    if (firstVisible(['.beetle-catch-module__catch-button','.beetle-catch-module__hunt-button','.beetle-catch-module'])) return true;
-    var nav = firstVisible(['.beetle-game-nav']); if (nav && gameReady()) { safeClick(nav); return false; } return false;
-  }
-  function executeAction(cfg) {
-    if (cfg.guards && !cfg.guards()) return false;
-    if (cfg.cartridge && !ensureCartridge(cfg.cartridge, cfg.name)) return 'navigating';
-    if (cfg.needCatchView && !ensureCatchView()) return 'navigating';
-    var btn = findButton(cfg.selectors); if (!btn) return 'waiting';
+
+  function clickHuntButton() {
+    if (!onBeetle()) return 'wrong-cart';
+    var btn = findButton(['.beetle-catch-module__hunt-button']);
+    if (!btn) return 'no-button';
     var text = (btn.textContent||'').replace(/\s+/g,' ').trim();
-    if (/processing|loading/i.test(text)) return 'stuck';
-    if (cfg.textBlock && cfg.textBlock.test(text)) return 'blocked';
-    if (!safeClick(btn)) return 'failed'; cfg.onSuccess(); return 'fired';
+    if (/cooldown/i.test(text)) return 'cooldown';
+    if (/processing|loading/i.test(text)) return 'processing';
+    if (!safeClick(btn)) return 'click-failed';
+    S.session.hunts++; S.lastActionAt = Date.now(); logEvent('Auto-hunted (-'+HUNT_COST+' cheese)'); save();
+    return 'fired';
   }
-  var ACTIONS = {
-    claim: { name:'claim', cartridge:'beetle', needCatchView:true, selectors:['.beetle-catch-module__catch-button'],
-      guards:function() { if (!S.autoClaim) return false; if (currentCartridge() !== 'beetle') return false; var nav = document.querySelector('.beetle-game-nav .info'); return nav && /ready/i.test(nav.textContent); },
-      onSuccess:function() { _lastActionTime = Date.now(); S.session.claims++; logEvent('Auto-claimed beetle!'); save(); } },
-    hunt: { name:'hunt', cartridge:'beetle', needCatchView:true, selectors:['.beetle-catch-module__hunt-button'], textBlock:/cooldown/i,
-      guards:function() {
-        if (!S.autoHunt) return false;
-        if (Date.now() - _lastHuntClick < HUNT_DEBOUNCE) return false;
-        if (currentCartridge() !== 'beetle') return false;
-        var ch = S.mergedInventory.cheese||0;
-        if (ch === 0) { var m = bodyText().match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i); if (m) ch = parseInt(m[1].replace(/,/g,''),10); }
-        if (ch < HUNT_COST || ch - HUNT_COST < MIN_CHEESE) return false;
-        var ce = firstVisible(['.beetle-catch-module__hunt-button-cheese-cost']);
-        return !(ce && /cooldown/i.test(ce.textContent||''));
-      },
-      onSuccess:function() { _lastHuntClick = Date.now(); _lastActionTime = Date.now(); S.session.hunts++; logEvent('Auto-hunted (-'+HUNT_COST+' cheese)'); save(); } },
-    cheese: { name:'daily cheese', cartridge:'cheese', selectors:['.claim-button'],
-      guards:function() { var nav = document.querySelector('.cheese-claim-nav .info'); return nav && /ready/i.test(nav.textContent); },
-      onSuccess:function() { _lastActionTime = Date.now(); S.session.cheeseClaims++; logEvent('Auto-claimed daily cheese!'); save(); } }
-  };
+
+  function clickClaimButton() {
+    if (!onBeetle()) return 'wrong-cart';
+    var btn = findButton(['.beetle-catch-module__catch-button']);
+    if (!btn) return 'no-button';
+    var text = (btn.textContent||'').replace(/\s+/g,' ').trim();
+    if (/processing|loading/i.test(text)) return 'processing';
+    if (!safeClick(btn)) return 'click-failed';
+    S.session.claims++; S.lastActionAt = Date.now(); logEvent('Auto-claimed beetle!'); save();
+    return 'fired';
+  }
+
+  function clickCheeseButton() {
+    var btn = findButton(['.claim-button']);
+    if (!btn) return 'no-button';
+    if (!safeClick(btn)) return 'click-failed';
+    S.session.cheeseClaims++; S.lastActionAt = Date.now(); logEvent('Auto-claimed daily cheese!'); save();
+    return 'fired';
+  }
+
+  function claimReady() { var nav = document.querySelector('.beetle-game-nav .info'); return nav && /ready/i.test(nav.textContent); }
+  function huntReady() {
+    if (!S.autoHunt) return false;
+    var ch = S.mergedInventory.cheese||0;
+    if (ch === 0) { var m = bodyText().match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i); if (m) ch = parseInt(m[1].replace(/,/g,''),10); }
+    if (ch < HUNT_COST || ch - HUNT_COST < MIN_CHEESE) return false;
+    var ce = firstVisible(['.beetle-catch-module__hunt-button-cheese-cost']);
+    return !(ce && /cooldown/i.test(ce.textContent||''));
+  }
+  function cheeseReady() { var nav = document.querySelector('.cheese-claim-nav .info'); return nav && /ready/i.test(nav.textContent); }
 
   /* ═══════════════════════════════════════════════════════
      8. LOGIN FLOW
@@ -578,18 +588,17 @@
       var pass = document.querySelector('input[name="password"], input[type="password"]');
       var submit = document.querySelector('input[type="submit"], button[type="submit"]');
       if (!submit) { var btns = document.querySelectorAll('button, input[type="button"], a'); for (var i = 0; i < btns.length; i++) if (/^\s*sign\s*in\s*$/i.test(btns[i].textContent.trim())) { submit = btns[i]; break; } }
+      // Screen 3: login form with email + password
       if (email && pass) {
-        // Browser autofill shows values visually but .value stays empty in JS.
-        // Clicking submit triggers HTML5 validation which rejects empty .value.
-        // Fix: find the form and call .submit() directly to bypass validation,
-        // or simulate Enter key on password field (browser commits autofill on Enter).
-        var form = pass.closest('form') || email.closest('form');
-        if (form) return {screen:3, el:form, desc:'Sign In (form.submit)', useFormSubmit:true};
-        if (submit) return {screen:3, el:submit, desc:'Sign In (button click)'};
+        // Browser autofill shows values visually but .value stays empty.
+        // Pressing Enter on the password field commits autofill AND submits.
+        return {screen:3, el:pass, desc:'Sign In (Enter key)', useEnterKey:true};
       }
+      // Screen 2: Auth portal
       if (/AUTHENTICATION\s*PORTAL/i.test(body)) { var pb = document.querySelectorAll('button, a, div[role="button"]'); for (var j = 0; j < pb.length; j++) if (/^\s*SIGN\s*IN\s*$/i.test(pb[j].textContent.trim()) && !/NEW/i.test(pb[j].textContent)) return {screen:2,el:pb[j],desc:'Auth Portal SIGN IN'}; }
       return {screen:0,el:null,desc:'OIDC page, nothing actionable'};
     }
+    // Screen 1: main site logged out
     if (/sign\s*in\s*(or\s*register)?/i.test(body) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) {
       var si = null;
       document.querySelectorAll('a, button, div[role="button"]').forEach(function(el) { if (!si && /SIGN\s*IN/i.test(el.textContent) && el.closest('.navbar-content, header, nav, [class*="nav"]')) si = el; });
@@ -604,9 +613,13 @@
     var s = detectLoginScreen(); if (!s.el) return false;
     _lastLoginTime = Date.now(); _loginAttempts++;
     logEvent('Auto-login '+s.screen+'/3: '+s.desc); save();
-    // Screen 3: use form.submit() to bypass HTML5 validation (autofill leaves .value empty)
-    if (s.useFormSubmit && s.el.tagName === 'FORM') { s.el.submit(); }
-    else { safeClick(s.el); }
+    if (s.useEnterKey) {
+      // Focus password field, then press Enter — browser commits autofill values on Enter
+      s.el.focus();
+      s.el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+      s.el.dispatchEvent(new KeyboardEvent('keypress',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+      s.el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+    } else { safeClick(s.el); }
     return true;
   }
 
@@ -616,101 +629,168 @@
   function tick() {
     parseTimers(); refreshTimerDisplay();
     switch (S.machineState) {
-      case 'BOOTING': return handleBooting();
-      case 'LOGGED_OUT': return handleLoggedOut();
-      case 'LOGGING_IN': return handleLoggingIn();
-      case 'IDLE': return handleIdle();
-      case 'CLAIMING': case 'HUNTING': case 'CLAIMING_CHEESE': return handleWaiting();
-      case 'SCANNING': return;
-      case 'STUCK': return handleStuck();
+      case 'BOOTING':         return handleBooting();
+      case 'LOGGED_OUT':      return handleLoggedOut();
+      case 'LOGGING_IN':      return handleLoggingIn();
+      case 'IDLE':            return handleIdle();
+      case 'CLAIMING':        return handleActionWait();
+      case 'HUNTING':         return handleHunting();
+      case 'CLAIMING_CHEESE': return handleActionWait();
+      case 'SCANNING':        if (stateAge() > 60000) { logEvent('Scan timed out.'); _scanning = false; transition('IDLE'); } return;
+      case 'STUCK':           return handleStuck();
     }
   }
+
   function handleBooting() {
     if (authBlockReason()) { transition('LOGGED_OUT'); return; }
     if (!document.querySelector('#root, #app, .navbar-content, header, nav')) { if (stateAge() > 30000) { logEvent('App never loaded, refreshing...'); window.location.reload(); } return; }
     if (document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) {
       logEvent('Game loaded, automation active.'); _loginAttempts = 0;
       parseHammer(); parseLevel(); parseCraftMode();
-      // Don't auto-scan here — go straight to IDLE and let handleIdle
-      // decide priorities (cheese claim > hunt > scan). Auto-scanning on boot
-      // was fighting with cheese navigation by redirecting back to beetle.
-      transition('IDLE');
-      renderPanel(); return;
+      transition('IDLE'); renderPanel(); return;
     }
     if (/\/oidc\/.*openid-connect/i.test(window.location.href)) { transition('LOGGED_OUT'); return; }
     if (stateAge() > 15000) { logEvent('Navigating to game...'); window.location.assign('https://www.remilia.net/home?cartridge=beetle'); }
   }
+
   function handleLoggedOut() {
     if (gameReady() && document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) { logEvent('Login successful.'); _loginAttempts = 0; transition('BOOTING'); return; }
     if (tryAutoLogin()) transition('LOGGING_IN');
     else if (stateAge() > 120000) logThrottled('login-stuck','Still logged out after 2min.',120000);
   }
+
   function handleLoggingIn() {
     if (gameReady() && document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) { transition('BOOTING'); return; }
     if (authBlockReason() && stateAge() > LOGIN_COOLDOWN) { transition('LOGGED_OUT'); return; }
     if (stateAge() > 30000) transition('BOOTING');
   }
-  var _lastActionTime = 0;
+
   function handleIdle() {
     if (!gameReady()) { transition(authBlockReason() ? 'LOGGED_OUT' : 'BOOTING'); return; }
-    // PROCESSING detection — but NOT within 20s of a hunt/claim (buttons briefly show PROCESSING after click, that's normal)
-    var sinceAction = Date.now() - _lastActionTime;
-    if (sinceAction > 20000) {
+
+    // PROCESSING detection — only if we're on beetle cart, and only 30s+ after boot
+    // (S.lastActionAt is persisted so it survives reloads unlike _lastActionTime)
+    if (onBeetle() && Date.now() - _bootTime > 30000 && Date.now() - (S.lastActionAt||0) > 20000) {
       var cb = document.querySelector('.beetle-catch-module__catch-button'), hb = document.querySelector('.beetle-catch-module__hunt-button');
-      if ((cb && (cb.classList.contains('loading') || /PROCESSING/i.test(cb.textContent))) || (hb && (hb.classList.contains('loading') || /PROCESSING/i.test(hb.textContent)))) { logEvent('Buttons stuck on PROCESSING...'); transition('STUCK'); return; }
-    }
-    // Passive scan only when tab visible (needs DOM rendering)
-    if (tabVisible() && Date.now() - (S.lastPassiveScan||0) > 30000) passiveScan();
-    // Actions run even in background tabs
-    var r;
-    r = executeAction(ACTIONS.claim); if (r === 'fired') { transition('CLAIMING'); schedulePostAction(); return; } if (r === 'navigating') return; if (r === 'stuck') { transition('STUCK'); return; }
-    // Hunts fire rapidly — game allows 3-4 before cooldown. Schedule follow-up hunts.
-    r = executeAction(ACTIONS.hunt);
-    if (r === 'fired') {
-      _lastHuntScan = Date.now();
-      // Schedule follow-up hunts at 4s, 8s, 12s to catch all available hunts
-      for (var hi = 1; hi <= 3; hi++) {
-        (function(delay) {
-          setTimeout(function() {
-            if (S.machineState === 'IDLE') {
-              var r2 = executeAction(ACTIONS.hunt);
-              if (r2 === 'fired') _lastHuntScan = Date.now();
-            }
-          }, delay * 4000);
-        })(hi);
+      if ((cb && (cb.classList.contains('loading') || /PROCESSING/i.test(cb.textContent))) || (hb && (hb.classList.contains('loading') || /PROCESSING/i.test(hb.textContent)))) {
+        logEvent('Buttons stuck on PROCESSING...'); transition('STUCK'); return;
       }
+    }
+
+    // Passive scan only when visible and on beetle
+    if (tabVisible() && onBeetle() && Date.now() - (S.lastPassiveScan||0) > 30000) passiveScan();
+
+    // Priority 1: Claim (must be on beetle cartridge)
+    if (S.autoClaim && claimReady()) {
+      if (!onBeetle()) { ensureCartridge('beetle','claim'); return; }
+      var cr = clickClaimButton();
+      if (cr === 'fired') { transition('CLAIMING'); return; }
+      if (cr === 'processing') return; // wait, don't flag stuck yet
+    }
+
+    // Priority 2: Hunt (must be on beetle cartridge)
+    if (huntReady()) {
+      if (!onBeetle()) { ensureCartridge('beetle','hunt'); return; }
+      var hr = clickHuntButton();
+      if (hr === 'fired') { transition('HUNTING'); return; }
+      if (hr === 'processing') return; // game is processing, wait
+    }
+
+    // Priority 3: Daily cheese (navigates to cheese cartridge, then back)
+    if (cheeseReady()) {
+      if (currentCartridge() !== 'cheese') { ensureCartridge('cheese','daily cheese'); return; }
+      var chr = clickCheeseButton();
+      if (chr === 'fired') { transition('CLAIMING_CHEESE'); return; }
+    }
+
+    // Priority 4: Full scan (only when visible and on beetle)
+    if (tabVisible() && !_scanning && onBeetle() && Date.now() - (S.lastFullScan||0) > STALE_MS) {
+      transition('SCANNING'); fullScan().then(function() { transition('IDLE'); });
       return;
     }
-    if (r === 'navigating') return; if (r === 'stuck') { transition('STUCK'); return; }
-    // If hunts were firing recently and stopped (cooldown kicked in), do a post-hunt scan
-    if (_lastHuntScan && Date.now() - _lastHuntScan > 20000) { _lastHuntScan = 0; schedulePostAction(); }
-    r = executeAction(ACTIONS.cheese); if (r === 'fired') { transition('CLAIMING_CHEESE'); schedulePostAction(); return; } if (r === 'navigating') return;
-    // Full scan only when tab visible
-    if (tabVisible() && !_scanning && Date.now() - (S.lastFullScan||0) > STALE_MS && ensureCartridge('beetle','scan')) { transition('SCANNING'); fullScan().then(function() { transition('IDLE'); }); }
+
+    // If on cheese after cheese claim, navigate back to beetle
+    if (!onBeetle() && !cheeseReady()) { ensureCartridge('beetle','return home'); return; }
+
     if (tabVisible()) renderPanel();
   }
-  var _postTimer = null;
-  function schedulePostAction() {
-    save(); if (_postTimer) clearTimeout(_postTimer);
-    _postTimer = setTimeout(function() { _postTimer = null;
-      if (tabVisible()) { passiveScan(); renderPanel(); }
-      // Only scan if no urgent actions pending (cheese ready blocks scan)
-      var cheeseNav = document.querySelector('.cheese-claim-nav .info');
-      var cheeseReady = cheeseNav && /ready/i.test(cheeseNav.textContent);
-      if (!cheeseReady) {
-        setTimeout(function() { if (!_scanning && S.machineState !== 'SCANNING') { transition('SCANNING'); fullScan().then(function() { transition('IDLE'); }); } }, 5000);
-      }
-    }, 8000);
-    setTimeout(function() { if (S.machineState === 'CLAIMING' || S.machineState === 'HUNTING' || S.machineState === 'CLAIMING_CHEESE') transition('IDLE'); }, ACTION_TIMEOUT);
+
+  // HUNTING state: wait 10s for game to process, then check if we can hunt again
+  function handleHunting() {
+    if (!onBeetle()) { transition('IDLE'); return; } // wrong cart, bail
+    if (stateAge() < 10000) return; // wait 10 seconds for game to process
+
+    // Check hunt button state
+    var btn = document.querySelector('.beetle-catch-module__hunt-button');
+    if (!btn) { transition('IDLE'); return; }
+    var text = (btn.textContent||'').replace(/\s+/g,' ').trim();
+
+    // Cooldown started — hunting is done
+    if (/cooldown/i.test(text) || /\d+\s*[mh]/i.test(text)) {
+      logEvent('Hunt cooldown started.'); transition('IDLE');
+      // Schedule post-hunt scan
+      setTimeout(function() { if (S.machineState === 'IDLE' && onBeetle() && tabVisible() && !_scanning) { transition('SCANNING'); fullScan().then(function() { transition('IDLE'); }); } }, 5000);
+      return;
+    }
+
+    // Still processing — keep waiting
+    if (/processing|loading/i.test(text)) return;
+
+    // Button is ready — hunt again!
+    if (huntReady()) {
+      var r = clickHuntButton();
+      if (r === 'fired') { S.stateEnteredAt = Date.now(); save(); return; } // reset wait timer
+    }
+
+    // Fallback: if we've been here 30s+ and nothing happened, go back to IDLE
+    if (stateAge() > 30000) { transition('IDLE'); }
   }
-  function handleWaiting() { if (stateAge() > ACTION_TIMEOUT) transition('IDLE'); }
+
+  // CLAIMING / CLAIMING_CHEESE: wait for action to complete, then return to IDLE
+  function handleActionWait() {
+    if (stateAge() > ACTION_TIMEOUT) {
+      // After cheese claim, return to beetle
+      if (S.machineState === 'CLAIMING_CHEESE' && currentCartridge() === 'cheese') {
+        ensureCartridge('beetle','return after cheese');
+      }
+      transition('IDLE');
+      return;
+    }
+    // Early return to IDLE if buttons are no longer processing
+    if (stateAge() > 5000) {
+      if (S.machineState === 'CLAIMING') {
+        var cb = document.querySelector('.beetle-catch-module__catch-button');
+        if (cb && !/processing|loading/i.test(cb.textContent||'')) { transition('IDLE'); return; }
+      }
+      if (S.machineState === 'CLAIMING_CHEESE' && stateAge() > 10000) {
+        // After cheese, navigate back to beetle
+        if (currentCartridge() === 'cheese') ensureCartridge('beetle','return after cheese');
+        transition('IDLE'); return;
+      }
+    }
+  }
+
   function handleStuck() {
-    if (stateAge() < 15000) return;
+    // Don't flag stuck within 30s of boot (fresh page, buttons may still be loading)
+    if (Date.now() - _bootTime < 30000) { transition('IDLE'); return; }
+    if (stateAge() < 15000) return; // wait 15s before acting
+
     var cb = document.querySelector('.beetle-catch-module__catch-button'), hb = document.querySelector('.beetle-catch-module__hunt-button');
     var still = (cb && (cb.classList.contains('loading') || /PROCESSING/i.test(cb.textContent))) || (hb && (hb.classList.contains('loading') || /PROCESSING/i.test(hb.textContent)));
     if (!still) { logEvent('Recovered from stuck.'); transition('IDLE'); return; }
-    if (stateAge() < 60000) { logEvent('Refreshing to recover...'); save(); window.location.reload(); }
-    else { logEvent('Hard reset.'); transition('BOOTING'); window.location.assign('https://www.remilia.net/home?cartridge=beetle'); }
+
+    // Track reload count in persisted state to prevent infinite loops
+    if (!S.stuckReloads) S.stuckReloads = 0;
+    if (S.stuckReloads >= 3) {
+      logEvent('Stuck after 3 reloads. Waiting 5 min...');
+      S.stuckReloads = 0; save();
+      // Just go IDLE and let the next cycle try again in 5 minutes
+      setTimeout(function() { transition('IDLE'); }, 300000);
+      return;
+    }
+    S.stuckReloads++; save();
+    logEvent('Refreshing to recover (attempt '+S.stuckReloads+'/3)...');
+    window.location.reload();
   }
 
   /* ═══════════════════════════════════════════════════════
