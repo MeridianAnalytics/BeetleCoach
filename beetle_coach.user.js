@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.2.0
+// @version      12.4.1
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -25,7 +25,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.2.0';
+  var VER = '12.4.1';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -38,6 +38,8 @@
   var LOGIN_COOLDOWN = 15000;
   var LOGIN_MAX = 10;
   var NAV_COOLDOWN = 60000;
+  var VIEW_COOLDOWN = 8000;
+  var HUNT_RETRY_DELAY = 3500;
   var BOOT_GRACE = 10000;     // 10s grace before any navigation
   var LOG_THROTTLE = 30000;
 
@@ -284,7 +286,19 @@
   function currentCartridge() { var m = window.location.href.match(/[?&]cartridge=([^&#]+)/i); return m ? m[1].toLowerCase() : ''; }
   function safeClick(el) { if (!el) return false; try { el.click(); return true; } catch(e) {} try { el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); return true; } catch(e2) {} return false; }
   function firstVisible(sels) { for (var i = 0; i < sels.length; i++) { var nodes = document.querySelectorAll(sels[i]); for (var j = 0; j < nodes.length; j++) if (isVisible(nodes[j])) return nodes[j]; } return null; }
-  function findButton(sels) { var btn = firstVisible(sels); return (btn && !btn.disabled && !btn.classList.contains('disabled') && btn.getAttribute('aria-disabled') !== 'true') ? btn : null; }
+  function buttonText(el) { return ((el && (el.textContent || el.value || el.getAttribute('aria-label') || '')) || '').replace(/\s+/g,' ').trim(); }
+  function buttonUsable(btn) { return !!(btn && !btn.disabled && !btn.classList.contains('disabled') && btn.getAttribute('aria-disabled') !== 'true'); }
+  function findButton(sels) { var btn = firstVisible(sels); return buttonUsable(btn) ? btn : null; }
+  function findTextButton(root, re) {
+    if (!root) return null;
+    var nodes = root.querySelectorAll('button, a, div[role="button"], input[type="button"], input[type="submit"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (!isVisible(el) || !buttonUsable(el)) continue;
+      if (re.test(buttonText(el))) return el;
+    }
+    return null;
+  }
   function bestHammerTier() { return S.ownedHammers.length ? Math.max.apply(null, S.ownedHammers.map(function(h) { return HAMMER_TIERS.indexOf(h); })) : -1; }
 
   /* ═══════════════════════════════════════════════════════
@@ -298,6 +312,7 @@
       currentHammerBonus:null, currentHammerBreakChance:null, timers:{}, lastFullScan:0, lastPassiveScan:0,
       autoClaim:true, autoHunt:true, panelOpen:true, level:null, craftMode:null, strategy:'endgame',
       log:[], machineState:'BOOTING', stateEnteredAt:Date.now(), lastActionAt:0, stuckReloads:0,
+      disconnectedSince:0, disconnectReloads:0,
       session:defaultSession() };
   }
   function normalizeSession(rawSession) {
@@ -335,13 +350,23 @@
     } catch(e) { return defaults(); }
   }
   function save() { try { GM_setValue(STORE_KEY, JSON.stringify(S)); } catch(e) {} }
-  var S = load();
-  function transition(state) { S.machineState = state; S.stateEnteredAt = Date.now(); save(); }
+  var S = load(), _huntRetryTimer = null;
+  function transition(state) {
+    if (state !== 'HUNTING' && _huntRetryTimer) { clearTimeout(_huntRetryTimer); _huntRetryTimer = null; }
+    S.machineState = state; S.stateEnteredAt = Date.now(); save();
+  }
   function stateAge() { return Date.now() - S.stateEnteredAt; }
 
   var _throttled = {};
   function logEvent(msg) { var ts = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); S.log.push(ts+' '+msg); if (S.log.length > 30) S.log = S.log.slice(-30); save(); var el = document.getElementById('bc8-log'); if (el) el.innerHTML = S.log.slice().reverse().map(function(l) { return '<div class="bc8-log-line">'+l+'</div>'; }).join(''); }
   function logThrottled(key, msg, ms) { var now = Date.now(); if (now - (_throttled[key]||0) < (ms||LOG_THROTTLE)) return; _throttled[key] = now; logEvent(msg); }
+  function scheduleHuntRetry(ms) {
+    if (_huntRetryTimer) clearTimeout(_huntRetryTimer);
+    _huntRetryTimer = setTimeout(function() {
+      _huntRetryTimer = null;
+      if (S.machineState === 'HUNTING') handleHunting();
+    }, ms || HUNT_RETRY_DELAY);
+  }
 
   /* ═══════════════════════════════════════════════════════
      5. DOM PARSING
@@ -518,28 +543,115 @@
   /* ═══════════════════════════════════════════════════════
      7. ACTIONS
      ═══════════════════════════════════════════════════════ */
-  var _navBlockedUntil = 0, _bootTime = Date.now();
+  var _navBlockedUntil = 0, _viewBlockedUntil = 0, _bootTime = Date.now();
+
+  // Cartridge eject detection + lever click. Scoped to .beetle-catch-module:
+  // the page has THREE .toggle-container elements (catch / ubc / crafting),
+  // each with its own .toggle-bar.ejected state. A global selector would
+  // fire ejection recovery whenever the crafting cart is "ejected" (which
+  // is normal — we're not playing it), and could click the wrong lever.
+  // We only care about the catch module's lever.
+  function isCartridgeEjected() {
+    var bar = document.querySelector('.beetle-catch-module .toggle-bar');
+    if (bar && bar.classList.contains('ejected')) return true;
+    return !!document.querySelector(
+      '.beetle-catch-module__catch-button.disconnected, ' +
+      '.beetle-catch-module__hunt-button.disconnected'
+    );
+  }
+  function loadCartridge() {
+    // The React onClick handler lives on .toggle-container itself (cursor:
+    // pointer is set there). Click the container directly; bar/knob clicks
+    // bubble up but being explicit avoids any stopPropagation surprises.
+    var container = document.querySelector('.beetle-catch-module .toggle-container');
+    if (!container || !isVisible(container)) return false;
+    var ok = safeClick(container);
+    // Belt-and-suspenders: synthesize a pointer pair for React listeners
+    // that bind pointerdown/pointerup instead of click.
+    try {
+      container.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true,cancelable:true,pointerType:'mouse'}));
+      container.dispatchEvent(new PointerEvent('pointerup',   {bubbles:true,cancelable:true,pointerType:'mouse'}));
+    } catch(e) { /* PointerEvent constructor unavailable; click alone has to do */ }
+    return ok;
+  }
+
   function authBlockReason() { var t = bodyText(); if (/oidc-spa:\s*for security reasons/i.test(t) || /auth response/i.test(t)) return 'auth'; if (/sign in\s*or\s*register/i.test(t)) return 'signed-out'; if (/\bsign in\b/i.test(t) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) return 'signed-out'; return null; }
   function tabVisible() { return !document.visibilityState || document.visibilityState === 'visible'; }
   function gameReady() { return !authBlockReason() && !!document.querySelector('#root, #app, .navbar-content, header, nav'); }
   function onBeetle() { return currentCartridge() === 'beetle'; }
-  function navReady() { return gameReady() && !(_navBlockedUntil && Date.now() < _navBlockedUntil) && Date.now() - _bootTime >= BOOT_GRACE && !!document.querySelector('.navbar-content, .search-input, .beetle-game-nav, .cheese-claim-nav'); }
+  function onCraftView() { return !!firstVisible(['.crafting-module','.crafting-module__inventory-grid','.crafting-module__hammer-row']); }
+  function onCatchView() {
+    return !!firstVisible([
+      '.beetle-catch-module__catch-button',
+      '.beetle-catch-module__hunt-button',
+      '.beetle-catch-module__cooldown-timer',
+      '.beetle-catch-module__hunt-button-cheese-cost'
+    ]);
+  }
+  function navReady() { return gameReady() && !detectLoginScreen().screen && !(_navBlockedUntil && Date.now() < _navBlockedUntil) && Date.now() - _bootTime >= BOOT_GRACE && !!document.querySelector('.navbar-content, .search-input, .beetle-game-nav, .cheese-claim-nav'); }
 
   function ensureCartridge(cart, reason) {
     cart = (cart||'').toLowerCase();
     if (currentCartridge() === cart) return true;
-    if (!navReady()) return false;
+    if (!navReady()) {
+      if (detectLoginScreen().screen) logThrottled('nav-login-'+cart, 'Navigation deferred while login is active.', 60000);
+      return false;
+    }
     var target = cart === 'beetle' ? firstVisible(['.beetle-game-nav','a[href*="cartridge=beetle"]']) : cart === 'cheese' ? firstVisible(['.cheese-claim-nav','a[href*="cartridge=cheese"]']) : null;
     _navBlockedUntil = Date.now() + NAV_COOLDOWN;
     if (target && safeClick(target)) { logEvent('Switching to '+cart+' for '+reason); return false; }
     logEvent('Navigating to '+cart+' for '+reason); window.location.assign('https://www.remilia.net/home?cartridge='+cart); return false;
   }
 
+  function ensureCatchView(reason) {
+    if (!onBeetle()) return false;
+    if (onCatchView()) return true;
+    if (!gameReady()) return false;
+    if (_viewBlockedUntil && Date.now() < _viewBlockedUntil) return false;
+    if (onCraftView()) {
+      _viewBlockedUntil = Date.now() + VIEW_COOLDOWN;
+      logThrottled('catch-reload-'+reason, 'Reloading Beetle Catch for '+reason+'.', 30000);
+      window.location.assign('https://www.remilia.net/home?cartridge=beetle');
+      return false;
+    }
+    var nav = firstVisible(['.beetle-game-nav','a[href*="cartridge=beetle"]']);
+    if (!nav) {
+      _viewBlockedUntil = Date.now() + VIEW_COOLDOWN;
+      logThrottled('catch-nav-missing', 'Beetle Catch nav not available yet. Reloading beetle.', 30000);
+      window.location.assign('https://www.remilia.net/home?cartridge=beetle');
+      return false;
+    }
+    _viewBlockedUntil = Date.now() + VIEW_COOLDOWN;
+    logThrottled('catch-view-'+reason, 'Switching to Beetle Catch for '+reason+'.', 15000);
+    safeClick(nav);
+    return false;
+  }
+
+  function currentCheeseCount() {
+    var m = bodyText().match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i);
+    if (m) return parseInt(m[1].replace(/,/g,''),10) || 0;
+    return parseInt(S.mergedInventory.cheese,10) || 0;
+  }
+
+  function findCatchActionButton(kind) {
+    var btn = findButton([kind === 'hunt' ? '.beetle-catch-module__hunt-button' : '.beetle-catch-module__catch-button']);
+    if (btn) return btn;
+    var root = firstVisible(['.beetle-catch-module']);
+    return findTextButton(root, kind === 'hunt' ? /\bhunt(?:\s+beetle)?\b/i : /\bclaim(?:\s+beetle)?\b/i);
+  }
+
+  function findCheeseClaimButton() {
+    var btn = findButton(['.claim-button']);
+    if (btn) return btn;
+    var root = firstVisible(['.cheese-claim-module','[class*="cheese"]']);
+    return findTextButton(root, /\bclaim\b/i);
+  }
+
   function clickHuntButton() {
     if (!onBeetle()) return 'wrong-cart';
-    var btn = findButton(['.beetle-catch-module__hunt-button']);
+    var btn = findCatchActionButton('hunt');
     if (!btn) return 'no-button';
-    var text = (btn.textContent||'').replace(/\s+/g,' ').trim();
+    var text = buttonText(btn);
     if (/cooldown/i.test(text)) return 'cooldown';
     if (/processing|loading/i.test(text)) return 'processing';
     if (!safeClick(btn)) return 'click-failed';
@@ -549,9 +661,9 @@
 
   function clickClaimButton() {
     if (!onBeetle()) return 'wrong-cart';
-    var btn = findButton(['.beetle-catch-module__catch-button']);
+    var btn = findCatchActionButton('claim');
     if (!btn) return 'no-button';
-    var text = (btn.textContent||'').replace(/\s+/g,' ').trim();
+    var text = buttonText(btn);
     if (/processing|loading/i.test(text)) return 'processing';
     if (!safeClick(btn)) return 'click-failed';
     S.session.claims++; S.lastActionAt = Date.now(); logEvent('Auto-claimed beetle!'); save();
@@ -559,7 +671,7 @@
   }
 
   function clickCheeseButton() {
-    var btn = findButton(['.claim-button']);
+    var btn = findCheeseClaimButton();
     if (!btn) return 'no-button';
     if (!safeClick(btn)) return 'click-failed';
     S.session.cheeseClaims++; S.lastActionAt = Date.now(); logEvent('Auto-claimed daily cheese!'); save();
@@ -569,8 +681,7 @@
   function claimReady() { var nav = document.querySelector('.beetle-game-nav .info'); return nav && /ready/i.test(nav.textContent); }
   function huntReady() {
     if (!S.autoHunt) return false;
-    var ch = S.mergedInventory.cheese||0;
-    if (ch === 0) { var m = bodyText().match(/YOU HAVE (\d[\d,]*) (?:PIECES OF )?CHEESE/i); if (m) ch = parseInt(m[1].replace(/,/g,''),10); }
+    var ch = currentCheeseCount();
     if (ch < HUNT_COST || ch - HUNT_COST < MIN_CHEESE) return false;
     var ce = firstVisible(['.beetle-catch-module__hunt-button-cheese-cost']);
     return !(ce && /cooldown/i.test(ce.textContent||''));
@@ -590,9 +701,9 @@
       if (!submit) { var btns = document.querySelectorAll('button, input[type="button"], a'); for (var i = 0; i < btns.length; i++) if (/^\s*sign\s*in\s*$/i.test(btns[i].textContent.trim())) { submit = btns[i]; break; } }
       // Screen 3: login form with email + password
       if (email && pass) {
-        // Browser autofill shows values visually but .value stays empty.
-        // Pressing Enter on the password field commits autofill AND submits.
-        return {screen:3, el:pass, desc:'Sign In (Enter key)', useEnterKey:true};
+        var form = pass.closest('form') || email.closest('form') || null;
+        // Browser autofill is inconsistent here, so we keep multiple submit paths ready.
+        return {screen:3, el:submit || pass, pass:pass, submit:submit, form:form, desc:'Sign In (robust submit)', useRobustSubmit:true};
       }
       // Screen 2: Auth portal
       if (/AUTHENTICATION\s*PORTAL/i.test(body)) { var pb = document.querySelectorAll('button, a, div[role="button"]'); for (var j = 0; j < pb.length; j++) if (/^\s*SIGN\s*IN\s*$/i.test(pb[j].textContent.trim()) && !/NEW/i.test(pb[j].textContent)) return {screen:2,el:pb[j],desc:'Auth Portal SIGN IN'}; }
@@ -613,12 +724,35 @@
     var s = detectLoginScreen(); if (!s.el) return false;
     _lastLoginTime = Date.now(); _loginAttempts++;
     logEvent('Auto-login '+s.screen+'/3: '+s.desc); save();
-    if (s.useEnterKey) {
-      // Focus password field, then press Enter — browser commits autofill values on Enter
-      s.el.focus();
-      s.el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
-      s.el.dispatchEvent(new KeyboardEvent('keypress',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
-      s.el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+    if (s.useRobustSubmit) {
+      var pass = s.pass;
+      // Re-fire React's native value setter so the framework registers
+      // the autofilled password. Plain .value = ... bypasses the React
+      // tracker and the form thinks the field is empty.
+      if (pass && pass.value) {
+        try {
+          var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          var v = pass.value;
+          setter.call(pass, '');
+          pass.dispatchEvent(new Event('input', {bubbles:true}));
+          setter.call(pass, v);
+          pass.dispatchEvent(new Event('input', {bubbles:true}));
+          pass.dispatchEvent(new Event('change', {bubbles:true}));
+        } catch(e) { /* native setter unavailable; fall through */ }
+      }
+      // Prefer real form submission over .click() — Keycloak forms often
+      // ignore button clicks when the value is autofilled.
+      if (s.form) {
+        try {
+          if (s.submit && s.form.requestSubmit) s.form.requestSubmit(s.submit);
+          else if (s.form.requestSubmit) s.form.requestSubmit();
+          else s.form.submit();
+        } catch(e) {
+          if (s.submit) safeClick(s.submit);
+        }
+      } else if (s.submit) {
+        safeClick(s.submit);
+      }
     } else { safeClick(s.el); }
     return true;
   }
@@ -649,8 +783,8 @@
       parseHammer(); parseLevel(); parseCraftMode();
       transition('IDLE'); renderPanel(); return;
     }
-    if (/\/oidc\/.*openid-connect/i.test(window.location.href)) { transition('LOGGED_OUT'); return; }
-    if (stateAge() > 15000) { logEvent('Navigating to game...'); window.location.assign('https://www.remilia.net/home?cartridge=beetle'); }
+    if (/\/oidc\/.*openid-connect/i.test(window.location.href) || detectLoginScreen().screen) { transition('LOGGED_OUT'); return; }
+    if (stateAge() > 15000) ensureCartridge('beetle','startup');
   }
 
   function handleLoggedOut() {
@@ -668,6 +802,34 @@
   function handleIdle() {
     if (!gameReady()) { transition(authBlockReason() ? 'LOGGED_OUT' : 'BOOTING'); return; }
 
+    // Cartridge ejected? Pull the LOAD lever every tick. The previous
+    // version reloaded the page after 90s of stuck-eject — that turned
+    // out to be useless, since reloads land on the same ejected state
+    // and just chew through the retry cap. Just keep clicking; if the
+    // lever genuinely isn't responding, that's an auth/session issue
+    // no amount of clicking or reloading will fix.
+    if (onBeetle() && isCartridgeEjected()) {
+      if (!S.disconnectedSince) { S.disconnectedSince = Date.now(); save(); }
+      var disconnDur = Date.now() - S.disconnectedSince;
+      if (loadCartridge()) {
+        logThrottled('cart-load','Cartridge ejected; pulling LOAD lever ('+Math.round(disconnDur/1000)+'s).',30000);
+      } else {
+        logThrottled('cart-load-fail','Cartridge ejected but LOAD lever not found in beetle-catch-module.',30000);
+      }
+      // Stuck >5 min: dump the bar class list every 5 min so we can see
+      // whether React is updating state (click reaching handler) or the
+      // game is forcing the eject (likely auth/session).
+      if (disconnDur > 300000 && (!S.lastEjectDiag || Date.now() - S.lastEjectDiag > 300000)) {
+        S.lastEjectDiag = Date.now();
+        var diagBar = document.querySelector('.beetle-catch-module .toggle-bar');
+        logEvent('Lever stuck '+Math.round(disconnDur/60000)+'m; bar.class='+(diagBar?diagBar.className:'(missing)'));
+        save();
+      }
+      return;
+    }
+    // Reconnected — clear trackers
+    if (S.disconnectedSince) { S.disconnectedSince = 0; S.lastEjectDiag = 0; save(); }
+
     // PROCESSING detection — only if we're on beetle cart, and only 30s+ after boot
     // (S.lastActionAt is persisted so it survives reloads unlike _lastActionTime)
     if (onBeetle() && Date.now() - _bootTime > 30000 && Date.now() - (S.lastActionAt||0) > 20000) {
@@ -683,17 +845,23 @@
     // Priority 1: Claim (must be on beetle cartridge)
     if (S.autoClaim && claimReady()) {
       if (!onBeetle()) { ensureCartridge('beetle','claim'); return; }
+      if (!ensureCatchView('claim')) return;
       var cr = clickClaimButton();
       if (cr === 'fired') { transition('CLAIMING'); return; }
       if (cr === 'processing') return; // wait, don't flag stuck yet
+      if (cr === 'no-button') { _viewBlockedUntil = 0; ensureCatchView('claim refresh'); logThrottled('claim-no-button','Claim ready but Claim button is not available yet.',30000); return; }
+      if (cr === 'click-failed') { logThrottled('claim-click-failed','Claim click failed; retrying.',30000); return; }
     }
 
     // Priority 2: Hunt (must be on beetle cartridge)
     if (huntReady()) {
       if (!onBeetle()) { ensureCartridge('beetle','hunt'); return; }
+      if (!ensureCatchView('hunt')) return;
       var hr = clickHuntButton();
-      if (hr === 'fired') { transition('HUNTING'); return; }
-      if (hr === 'processing') return; // game is processing, wait
+      if (hr === 'fired') { transition('HUNTING'); scheduleHuntRetry(HUNT_RETRY_DELAY); return; }
+      if (hr === 'processing') { scheduleHuntRetry(HUNT_RETRY_DELAY); return; } // game is processing, wait
+      if (hr === 'no-button') { _viewBlockedUntil = 0; ensureCatchView('hunt refresh'); logThrottled('hunt-no-button','Hunt ready but Hunt button is not available yet.',30000); return; }
+      if (hr === 'click-failed') { logThrottled('hunt-click-failed','Hunt click failed; retrying.',30000); return; }
     }
 
     // Priority 3: Daily cheese (navigates to cheese cartridge, then back)
@@ -715,15 +883,26 @@
     if (tabVisible()) renderPanel();
   }
 
-  // HUNTING state: wait 10s for game to process, then check if we can hunt again
+  // HUNTING state: revisit quickly so multi-hunt bursts don't wait for the global tick
   function handleHunting() {
-    if (!onBeetle()) { transition('IDLE'); return; } // wrong cart, bail
-    if (stateAge() < 10000) return; // wait 10 seconds for game to process
+    if (!gameReady()) { transition(authBlockReason() ? 'LOGGED_OUT' : 'BOOTING'); return; }
+    if (!onBeetle()) { ensureCartridge('beetle','hunt follow-up'); scheduleHuntRetry(HUNT_RETRY_DELAY); return; }
+    // If the cartridge ejected mid-hunt, bounce back to IDLE so the
+    // disconnect-reload safety net can manage recovery.
+    if (isCartridgeEjected()) { transition('IDLE'); return; }
+    if (!ensureCatchView('hunt follow-up')) { scheduleHuntRetry(HUNT_RETRY_DELAY); return; }
+    if (stateAge() < HUNT_RETRY_DELAY) { scheduleHuntRetry(HUNT_RETRY_DELAY - stateAge()); return; }
 
     // Check hunt button state
-    var btn = document.querySelector('.beetle-catch-module__hunt-button');
-    if (!btn) { transition('IDLE'); return; }
-    var text = (btn.textContent||'').replace(/\s+/g,' ').trim();
+    var btn = findCatchActionButton('hunt');
+    if (!btn) {
+      _viewBlockedUntil = 0; ensureCatchView('hunt follow-up refresh');
+      logThrottled('hunt-followup-missing','Waiting for Hunt button to return.',30000);
+      if (stateAge() > ACTION_TIMEOUT) transition('IDLE');
+      else scheduleHuntRetry(HUNT_RETRY_DELAY);
+      return;
+    }
+    var text = buttonText(btn);
 
     // Cooldown started — hunting is done
     if (/cooldown/i.test(text) || /\d+\s*[mh]/i.test(text)) {
@@ -734,16 +913,18 @@
     }
 
     // Still processing — keep waiting
-    if (/processing|loading/i.test(text)) return;
+    if (/processing|loading/i.test(text)) { scheduleHuntRetry(HUNT_RETRY_DELAY); return; }
 
     // Button is ready — hunt again!
     if (huntReady()) {
       var r = clickHuntButton();
-      if (r === 'fired') { S.stateEnteredAt = Date.now(); save(); return; } // reset wait timer
+      if (r === 'fired') { S.stateEnteredAt = Date.now(); save(); scheduleHuntRetry(HUNT_RETRY_DELAY); return; } // reset wait timer
+      if (r === 'processing') { scheduleHuntRetry(HUNT_RETRY_DELAY); return; }
     }
 
     // Fallback: if we've been here 30s+ and nothing happened, go back to IDLE
-    if (stateAge() > 30000) { transition('IDLE'); }
+    if (stateAge() > ACTION_TIMEOUT) { transition('IDLE'); }
+    else scheduleHuntRetry(HUNT_RETRY_DELAY);
   }
 
   // CLAIMING / CLAIMING_CHEESE: wait for action to complete, then return to IDLE
