@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.1
+// @version      12.4.3
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -25,7 +25,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.1';
+  var VER = '12.4.3';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -560,19 +560,44 @@
     );
   }
   function loadCartridge() {
-    // The React onClick handler lives on .toggle-container itself (cursor:
-    // pointer is set there). Click the container directly; bar/knob clicks
-    // bubble up but being explicit avoids any stopPropagation surprises.
+    // Why DOM clicks don't work when ejected: the game layers a
+    // .carousel.disconnected overlay on top of .toggle-container when the
+    // cartridge is out (the "SELECT A GAME CARTRIDGE" panel). Hit-testing
+    // at the toggle's coordinates returns the overlay, so React's
+    // event-delegation never fires the onClick on .toggle-container even
+    // though c.click() dispatches a real event there. Direct invocation
+    // of the React props.onClick bypasses hit-testing. Also: load/eject
+    // is purely client state — no network call — and React commits the
+    // class change ~1–3s later (verified empirically), not synchronously.
     var container = document.querySelector('.beetle-catch-module .toggle-container');
     if (!container || !isVisible(container)) return false;
-    var ok = safeClick(container);
-    // Belt-and-suspenders: synthesize a pointer pair for React listeners
-    // that bind pointerdown/pointerup instead of click.
-    try {
-      container.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true,cancelable:true,pointerType:'mouse'}));
-      container.dispatchEvent(new PointerEvent('pointerup',   {bubbles:true,cancelable:true,pointerType:'mouse'}));
-    } catch(e) { /* PointerEvent constructor unavailable; click alone has to do */ }
-    return ok;
+    var barBefore = container.querySelector('.toggle-bar');
+    var classBefore = barBefore ? barBefore.className : '(missing)';
+    var propsKey = null;
+    for (var k in container) { if (k.indexOf('__reactProps') === 0) { propsKey = k; break; } }
+    var props = propsKey ? container[propsKey] : null;
+    var fired = false;
+    if (props && typeof props.onClick === 'function') {
+      try {
+        props.onClick({preventDefault:function(){},stopPropagation:function(){},currentTarget:container,target:container});
+        fired = true;
+      } catch(e) { /* fall through to DOM click */ }
+    }
+    if (!fired) fired = safeClick(container);
+    // Verify ~2000ms later (state commit can take 1–3s). If still ejected
+    // we log once per minute with class list + URL cart param so a
+    // genuine no-op surfaces; transient delays don't.
+    setTimeout(function() {
+      var barAfter = document.querySelector('.beetle-catch-module .toggle-bar');
+      var classAfter = barAfter ? barAfter.className : '(missing)';
+      if (classAfter.indexOf('ejected') !== -1) {
+        logThrottled('lever-noop',
+          'Lever click did not clear ejection. cart='+(currentCartridge()||'(none)')+
+          ' props='+(props?'yes':'no')+' before=['+classBefore+'] after=['+classAfter+']',
+          60000);
+      }
+    }, 2000);
+    return fired;
   }
 
   function authBlockReason() { var t = bodyText(); if (/oidc-spa:\s*for security reasons/i.test(t) || /auth response/i.test(t)) return 'auth'; if (/sign in\s*or\s*register/i.test(t)) return 'signed-out'; if (/\bsign in\b/i.test(t) && !document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) return 'signed-out'; return null; }
