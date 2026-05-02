@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.3
+// @version      12.4.4
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -25,7 +25,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.3';
+  var VER = '12.4.4';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -751,20 +751,37 @@
     logEvent('Auto-login '+s.screen+'/3: '+s.desc); save();
     if (s.useRobustSubmit) {
       var pass = s.pass;
+      // Chrome's autofill withholds the masked password value from JS
+      // until the user makes a real gesture on the page (focus/click).
+      // If we submit before that happens, pass.value is '' and Keycloak
+      // returns "Invalid username or password" — burning a login attempt
+      // for nothing. Touch the field to try to coax the value out, then
+      // bail out cleanly if it's still hidden so the user can click the
+      // Sign In button themselves (which counts as a gesture and reveals
+      // the value).
+      try { if (pass && typeof pass.focus === 'function') { pass.focus(); pass.blur(); } } catch(eF) {}
+      if (!pass || !pass.value) {
+        logThrottled('login-empty',
+          'Login form has no readable password (Chrome autofill needs a real click). ' +
+          'Click the Sign In button once manually — auto-login is paused until then.',
+          60000);
+        // Do NOT count this as an attempt: roll back the increment so
+        // we don't exhaust LOGIN_MAX while waiting for the user.
+        _loginAttempts = Math.max(0, _loginAttempts - 1);
+        return false;
+      }
       // Re-fire React's native value setter so the framework registers
       // the autofilled password. Plain .value = ... bypasses the React
       // tracker and the form thinks the field is empty.
-      if (pass && pass.value) {
-        try {
-          var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          var v = pass.value;
-          setter.call(pass, '');
-          pass.dispatchEvent(new Event('input', {bubbles:true}));
-          setter.call(pass, v);
-          pass.dispatchEvent(new Event('input', {bubbles:true}));
-          pass.dispatchEvent(new Event('change', {bubbles:true}));
-        } catch(e) { /* native setter unavailable; fall through */ }
-      }
+      try {
+        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        var v = pass.value;
+        setter.call(pass, '');
+        pass.dispatchEvent(new Event('input', {bubbles:true}));
+        setter.call(pass, v);
+        pass.dispatchEvent(new Event('input', {bubbles:true}));
+        pass.dispatchEvent(new Event('change', {bubbles:true}));
+      } catch(e) { /* native setter unavailable; fall through */ }
       // Prefer real form submission over .click() — Keycloak forms often
       // ignore button clicks when the value is autofilled.
       if (s.form) {
