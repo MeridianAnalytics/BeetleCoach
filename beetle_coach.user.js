@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.6
+// @version      12.4.7
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_notification
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/MeridianAnalytics/BeetleCoach/master/beetle_coach.user.js
 // @downloadURL  https://raw.githubusercontent.com/MeridianAnalytics/BeetleCoach/master/beetle_coach.user.js
@@ -27,7 +28,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.6';
+  var VER = '12.4.7';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -362,6 +363,21 @@
   var _throttled = {};
   function logEvent(msg) { var ts = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); S.log.push(ts+' '+msg); if (S.log.length > 30) S.log = S.log.slice(-30); save(); var el = document.getElementById('bc8-log'); if (el) el.innerHTML = S.log.slice().reverse().map(function(l) { return '<div class="bc8-log-line">'+l+'</div>'; }).join(''); }
   function logThrottled(key, msg, ms) { var now = Date.now(); if (now - (_throttled[key]||0) < (ms||LOG_THROTTLE)) return; _throttled[key] = now; logEvent(msg); }
+  // Desktop notification when the script genuinely needs the user (e.g.
+  // Chrome autofill needs a real click, Auth Portal stuck after reload).
+  // Throttled so we don't spam — at most one per category per 10 minutes.
+  // GM_notification works in background tabs without permission prompts.
+  var _notified = {};
+  function notify(key, title, body) {
+    var now = Date.now();
+    if (now - (_notified[key]||0) < 600000) return;
+    _notified[key] = now;
+    try {
+      if (typeof GM_notification === 'function') {
+        GM_notification({title: 'Beetle Coach: ' + title, text: body, timeout: 0, onclick: function(){ try { window.focus(); } catch(e){} }});
+      }
+    } catch(e) { /* GM_notification unavailable; the panel log still has the message */ }
+  }
   function scheduleHuntRetry(ms) {
     if (_huntRetryTimer) clearTimeout(_huntRetryTimer);
     _huntRetryTimer = setTimeout(function() {
@@ -772,6 +788,8 @@
           'Auth Portal SIGN IN button is stuck (already reloaded once). ' +
           'Hard-refresh the page (Ctrl+Shift+R) or close+reopen the tab.',
           120000);
+        notify('auth-portal-dead', 'Auth Portal stuck',
+          'SIGN IN button unresponsive after auto-reload. Hard-refresh (Ctrl+Shift+R) or reopen the tab.');
         _loginAttempts = Math.max(0, _loginAttempts - 1);
         return false;
       }
@@ -799,6 +817,8 @@
           'Login form has no readable password (Chrome autofill needs a real click). ' +
           'Click the Sign In button once manually — auto-login is paused until then.',
           60000);
+        notify('login-empty', 'Manual click needed',
+          'Login form is waiting for one click on Sign In to release Chrome autofill.');
         // Do NOT count this as an attempt: roll back the increment so
         // we don't exhaust LOGIN_MAX while waiting for the user.
         _loginAttempts = Math.max(0, _loginAttempts - 1);
@@ -1040,6 +1060,8 @@
     if (!S.stuckReloads) S.stuckReloads = 0;
     if (S.stuckReloads >= 3) {
       logEvent('Stuck after 3 reloads. Waiting 5 min...');
+      notify('stuck-reloads', 'Stuck after 3 reloads',
+        'Buttons stuck on PROCESSING after 3 reloads. Pausing 5 min — check if the page needs attention.');
       S.stuckReloads = 0; save();
       // Just go IDLE and let the next cycle try again in 5 minutes
       setTimeout(function() { transition('IDLE'); }, 300000);
