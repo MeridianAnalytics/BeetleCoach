@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.4
+// @version      12.4.5
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @run-at       document-start
+// @updateURL    https://raw.githubusercontent.com/MeridianAnalytics/BeetleCoach/master/beetle_coach.user.js
+// @downloadURL  https://raw.githubusercontent.com/MeridianAnalytics/BeetleCoach/master/beetle_coach.user.js
 // ==/UserScript==
 
 (function () {
@@ -25,7 +27,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.4';
+  var VER = '12.4.5';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
