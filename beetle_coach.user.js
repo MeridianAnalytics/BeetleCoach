@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.5
+// @version      12.4.6
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -27,7 +27,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.5';
+  var VER = '12.4.6';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -749,6 +749,38 @@
     if (Date.now() - _lastLoginTime < LOGIN_COOLDOWN) return false;
     if (_loginAttempts >= LOGIN_MAX) { logThrottled('login-max','Auto-login gave up after '+LOGIN_MAX+' attempts.',120000); return false; }
     var s = detectLoginScreen(); if (!s.el) return false;
+    // Auth Portal (screen 2) can get into a stuck state where the SIGN IN
+    // button's React onClick fires (s=>{s.preventDefault(),v(!0)}) but
+    // the resulting state change never produces a navigation — verified
+    // empirically: zero network requests after both scripted AND real
+    // human clicks. Symptom: cookies are empty / oidc-spa state is stale.
+    // Recovery: after 2 stuck clicks, force a reload (which usually
+    // restores cookies). If still stuck after the reload, log a clear
+    // message and stop hammering so the user can intervene.
+    if (s.screen === 2) {
+      if (!S.authPortalStuck) S.authPortalStuck = 0;
+      S.authPortalStuck++;
+      if (S.authPortalStuck === 3) {
+        logEvent('Auth Portal SIGN IN unresponsive after 2 clicks; reloading.');
+        S.authPortalStuck = 99; // mark as already-reloaded so we don't loop
+        save();
+        window.location.reload();
+        return true;
+      }
+      if (S.authPortalStuck > 3) {
+        logThrottled('auth-portal-dead',
+          'Auth Portal SIGN IN button is stuck (already reloaded once). ' +
+          'Hard-refresh the page (Ctrl+Shift+R) or close+reopen the tab.',
+          120000);
+        _loginAttempts = Math.max(0, _loginAttempts - 1);
+        return false;
+      }
+      save();
+    } else if (S.authPortalStuck) {
+      // Successfully advanced past the Auth Portal — reset the counter.
+      S.authPortalStuck = 0;
+      save();
+    }
     _lastLoginTime = Date.now(); _loginAttempts++;
     logEvent('Auto-login '+s.screen+'/3: '+s.desc); save();
     if (s.useRobustSubmit) {
