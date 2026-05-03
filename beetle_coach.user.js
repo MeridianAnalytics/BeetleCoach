@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.7
+// @version      12.4.8
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -28,7 +28,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.7';
+  var VER = '12.4.8';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -761,18 +761,49 @@
     }
     return {screen:0,el:null,desc:'Not a login screen'};
   }
+  // One-time setup: listen for ANY user gesture (mousedown/keydown/touch/
+  // focus). When the user is anywhere near the page — even clicking a
+  // random spot — Chrome releases the autofilled password to JS. The
+  // moment that happens we trigger a login retry instead of waiting up
+  // to 15s for the next poll. Critical for "I walked over and now it
+  // works" UX: any gesture, anywhere, kicks off submission within ~150ms.
+  function setupAutofillUnlock() {
+    if (window.__bcAutofillWatch) return;
+    window.__bcAutofillWatch = true;
+    var armed = function() {
+      // Give Chrome a moment to commit the autofill value, then poll
+      var done = false;
+      var attempts = 0;
+      var iv = setInterval(function() {
+        attempts++;
+        if (done || attempts > 8) { clearInterval(iv); return; }
+        var s = detectLoginScreen();
+        if (s.screen === 3 && s.pass && s.pass.value) {
+          done = true; clearInterval(iv);
+          logEvent('Gesture detected — autofill released, submitting.');
+          _loginAttempts = 0;       // reset attempt counter
+          _lastLoginTime = 0;       // bypass cooldown
+          tryAutoLogin();
+        }
+      }, 100);
+    };
+    document.addEventListener('mousedown', armed, true);
+    document.addEventListener('keydown', armed, true);
+    document.addEventListener('touchstart', armed, true);
+    window.addEventListener('focus', armed, true);
+    document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') armed(); }, true);
+  }
+
   function tryAutoLogin() {
+    setupAutofillUnlock(); // idempotent — only registers listeners once
     if (Date.now() - _lastLoginTime < LOGIN_COOLDOWN) return false;
-    if (_loginAttempts >= LOGIN_MAX) { logThrottled('login-max','Auto-login gave up after '+LOGIN_MAX+' attempts.',120000); return false; }
     var s = detectLoginScreen(); if (!s.el) return false;
-    // Auth Portal (screen 2) can get into a stuck state where the SIGN IN
-    // button's React onClick fires (s=>{s.preventDefault(),v(!0)}) but
-    // the resulting state change never produces a navigation — verified
-    // empirically: zero network requests after both scripted AND real
-    // human clicks. Symptom: cookies are empty / oidc-spa state is stale.
-    // Recovery: after 2 stuck clicks, force a reload (which usually
-    // restores cookies). If still stuck after the reload, log a clear
-    // message and stop hammering so the user can intervene.
+    // Auth Portal stuck-check MUST run BEFORE the LOGIN_MAX gate so we
+    // can still recover even after the budget was burned by earlier
+    // failed attempts on other screens. Symptom: SIGN IN button's React
+    // onClick fires (s=>{s.preventDefault(),v(!0)}) but produces zero
+    // network requests — verified live via Chrome DevTools. Cookies are
+    // typically empty in this state. Recovery: 2 clicks → forced reload.
     if (s.screen === 2) {
       if (!S.authPortalStuck) S.authPortalStuck = 0;
       S.authPortalStuck++;
@@ -790,7 +821,6 @@
           120000);
         notify('auth-portal-dead', 'Auth Portal stuck',
           'SIGN IN button unresponsive after auto-reload. Hard-refresh (Ctrl+Shift+R) or reopen the tab.');
-        _loginAttempts = Math.max(0, _loginAttempts - 1);
         return false;
       }
       save();
@@ -799,6 +829,12 @@
       S.authPortalStuck = 0;
       save();
     }
+    // LOGIN_MAX check moved here, AFTER the auth-portal recovery path,
+    // so a stuck portal can still trigger reload even if budget burned.
+    // Soft-reset the attempts every 5 min so we never permanently give
+    // up — the user might come back and need us to try again.
+    if (Date.now() - _lastLoginTime > 300000) _loginAttempts = 0;
+    if (_loginAttempts >= LOGIN_MAX) { logThrottled('login-max','Auto-login gave up after '+LOGIN_MAX+' attempts. Will retry in 5 min.',120000); return false; }
     _lastLoginTime = Date.now(); _loginAttempts++;
     logEvent('Auto-login '+s.screen+'/3: '+s.desc); save();
     if (s.useRobustSubmit) {
@@ -1098,7 +1134,7 @@
     var fmt = function(v) { return !v ? '\u2014' : /ready/i.test(v) ? '<span class="bc8-badge bc8-ready">Ready</span>' : '<span class="bc8-badge bc8-countdown">'+v+'</span>'; };
     var h = '', cheese = inv.cheese ? inv.cheese.toLocaleString() : '';
     // Header
-    h += '<div class="bc8-header"><span class="bc8-title"><span id="bc8-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach</span>';
+    h += '<div class="bc8-header"><span class="bc8-title"><span id="bc8-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach <span style="font-size:10px;color:#6b8a90;font-weight:600;">v'+VER+'</span></span>';
     h += '<span class="bc8-sub">'+(S.level?'Lv.'+S.level:'')+(cheese?' \u00B7 '+cheese+' \u{1F9C0}':'');
     h += ' \u00B7 <span id="bc8-fresh" class="bc8-badge '+(isFresh()?'bc8-fresh':'bc8-stale')+'">'+(isFresh()?'OK':'STALE')+'</span>';
     h += ' \u00B7 <span id="bc8-state" class="bc8-state">'+S.machineState+'</span></span></div>';
