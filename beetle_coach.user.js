@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.10
+// @version      12.4.11
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -28,7 +28,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.10';
+  var VER = '12.4.11';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -839,26 +839,16 @@
     logEvent('Auto-login '+s.screen+'/3: '+s.desc); save();
     if (s.useRobustSubmit) {
       var pass = s.pass;
-      // Chrome's autofill withholds the masked password value from JS
-      // until the user makes a real gesture on the page. Touch the field
-      // to try to coax the value out before checking.
+      // Don't gate on pass.value. Chrome's autofill DOES commit the real
+      // value to the form field — the JS isolation only blocks scripted
+      // reads via .value, NOT the browser's own form-submission read.
+      // form.requestSubmit() collects field values internally and POSTs
+      // them, even when our JS sees the field as empty. Just submit and
+      // trust the browser. If credentials are actually wrong we'll see
+      // "Invalid username or password" on the next render and back off
+      // (see invalidCredsBackoff below) so we don't lock the account.
       try { if (pass && typeof pass.focus === 'function') { pass.focus(); pass.blur(); } } catch(eF) {}
-      if (!pass || !pass.value) {
-        logThrottled('login-empty',
-          'Login form has no readable password (Chrome autofill needs a real click). ' +
-          'Click anywhere on the page once — gesture listener will auto-submit.',
-          60000);
-        notify('login-empty', 'Manual click needed',
-          'Click anywhere on the Beetle page to release Chrome autofill — script will take over.');
-        _loginAttempts = Math.max(0, _loginAttempts - 1);
-        return false;
-      }
-      // Path A: real <form> exists (Keycloak server-rendered HTML form).
-      // Just submit it directly — the form already has the autofilled
-      // value. Skip the React-tracker dance entirely; it's not React,
-      // and the blank-then-restore caused Keycloak to briefly mark the
-      // form invalid, which silently no-op'd requestSubmit() ~50ms later.
-      // Credit: in-browser Claude analysis identified this footgun.
+      // Path A: real <form> (Keycloak server-rendered) — submit directly.
       if (s.form) {
         try {
           if (s.submit && s.form.requestSubmit) s.form.requestSubmit(s.submit);
@@ -868,18 +858,37 @@
           if (s.submit) safeClick(s.submit);
         }
       } else {
-        // Path B: no <form> (React-only login surface). Fire a single
-        // input/change pass through React's native value-setter so the
-        // tracker notices the autofilled value, then click submit.
+        // Path B: no <form> (React-only). Fire input/change through the
+        // native value-setter only if pass.value is readable, then click.
         try {
-          var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          setter.call(pass, pass.value);
-          pass.dispatchEvent(new Event('input', {bubbles:true}));
-          pass.dispatchEvent(new Event('change', {bubbles:true}));
+          if (pass && pass.value) {
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(pass, pass.value);
+            pass.dispatchEvent(new Event('input', {bubbles:true}));
+            pass.dispatchEvent(new Event('change', {bubbles:true}));
+          }
         } catch(e) {}
         if (s.submit) safeClick(s.submit);
       }
     } else { safeClick(s.el); }
+    return true;
+  }
+  // After a robust submit, watch for "Invalid username or password" on
+  // the next render. If seen, back off hard — Keycloak rate-limits and
+  // can lock the account after enough failures. We pause for 10 minutes
+  // and ping the user so they can fix Chrome's saved password if it's
+  // actually stale.
+  function invalidCredsBackoff() {
+    if (!/oidc-spa|oidc\/.*openid-connect/i.test(window.location.href + ' ' + (document.referrer||''))) return false;
+    var body = bodyText();
+    if (!/invalid\s+(?:username|password|user|credentials)/i.test(body)) return false;
+    if (S.lastInvalidCreds && Date.now() - S.lastInvalidCreds < 600000) return true;
+    S.lastInvalidCreds = Date.now();
+    _loginAttempts = LOGIN_MAX; // park the budget so tryAutoLogin no-ops
+    save();
+    logEvent('Keycloak rejected credentials. Backing off 10 min — check Chrome saved password.');
+    notify('invalid-creds', 'Login rejected',
+      'Keycloak says invalid username/password. Pausing 10 min. Update your saved password in Chrome if you changed it elsewhere.');
     return true;
   }
   // NOTE: password storage helpers (bcSavePassword/bcClear/bcHas) were
@@ -921,7 +930,8 @@
   }
 
   function handleLoggedOut() {
-    if (gameReady() && document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) { logEvent('Login successful.'); _loginAttempts = 0; transition('BOOTING'); return; }
+    if (gameReady() && document.querySelector('.beetle-game-nav .info, .cheese-claim-nav .info')) { logEvent('Login successful.'); _loginAttempts = 0; S.lastInvalidCreds = 0; save(); transition('BOOTING'); return; }
+    if (invalidCredsBackoff()) return; // Keycloak rejected creds — pause
     if (tryAutoLogin()) transition('LOGGING_IN');
     else if (stateAge() > 120000) logThrottled('login-stuck','Still logged out after 2min.',120000);
   }
