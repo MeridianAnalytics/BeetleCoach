@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.8
+// @version      12.4.9
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -28,7 +28,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.8';
+  var VER = '12.4.9';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -840,40 +840,42 @@
     if (s.useRobustSubmit) {
       var pass = s.pass;
       // Chrome's autofill withholds the masked password value from JS
-      // until the user makes a real gesture on the page (focus/click).
-      // If we submit before that happens, pass.value is '' and Keycloak
-      // returns "Invalid username or password" — burning a login attempt
-      // for nothing. Touch the field to try to coax the value out, then
-      // bail out cleanly if it's still hidden so the user can click the
-      // Sign In button themselves (which counts as a gesture and reveals
-      // the value).
+      // until the user makes a real gesture on the page. Touch the field
+      // to try to coax the value out before checking.
       try { if (pass && typeof pass.focus === 'function') { pass.focus(); pass.blur(); } } catch(eF) {}
+      // If autofill is still hidden, optionally fall back to a stored
+      // password (set via window.bcSavePassword in the console). Without
+      // a stored password, bail and wait for the user to click anything
+      // — the gesture listener (setupAutofillUnlock) will retry instantly.
       if (!pass || !pass.value) {
-        logThrottled('login-empty',
-          'Login form has no readable password (Chrome autofill needs a real click). ' +
-          'Click the Sign In button once manually — auto-login is paused until then.',
-          60000);
-        notify('login-empty', 'Manual click needed',
-          'Login form is waiting for one click on Sign In to release Chrome autofill.');
-        // Do NOT count this as an attempt: roll back the increment so
-        // we don't exhaust LOGIN_MAX while waiting for the user.
-        _loginAttempts = Math.max(0, _loginAttempts - 1);
-        return false;
+        var stored = '';
+        try { stored = GM_getValue('bc_stored_password', '') || ''; } catch(eG){}
+        if (stored && pass) {
+          try {
+            var setterS = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setterS.call(pass, stored);
+            pass.dispatchEvent(new Event('input', {bubbles:true}));
+            pass.dispatchEvent(new Event('change', {bubbles:true}));
+            logEvent('Used stored password (autofill unavailable).');
+          } catch(eS) { /* setter failed; fall through to bail */ }
+        }
+        if (!pass.value) {
+          logThrottled('login-empty',
+            'Login form has no readable password (Chrome autofill needs a real click). ' +
+            'Click anywhere on the page once — gesture listener will auto-submit.',
+            60000);
+          notify('login-empty', 'Manual click needed',
+            'Click anywhere on the Beetle page to release Chrome autofill — script will take over.');
+          _loginAttempts = Math.max(0, _loginAttempts - 1);
+          return false;
+        }
       }
-      // Re-fire React's native value setter so the framework registers
-      // the autofilled password. Plain .value = ... bypasses the React
-      // tracker and the form thinks the field is empty.
-      try {
-        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        var v = pass.value;
-        setter.call(pass, '');
-        pass.dispatchEvent(new Event('input', {bubbles:true}));
-        setter.call(pass, v);
-        pass.dispatchEvent(new Event('input', {bubbles:true}));
-        pass.dispatchEvent(new Event('change', {bubbles:true}));
-      } catch(e) { /* native setter unavailable; fall through */ }
-      // Prefer real form submission over .click() — Keycloak forms often
-      // ignore button clicks when the value is autofilled.
+      // Path A: real <form> exists (Keycloak server-rendered HTML form).
+      // Just submit it directly — the form already has the autofilled
+      // value. Skip the React-tracker dance entirely; it's not React,
+      // and the blank-then-restore caused Keycloak to briefly mark the
+      // form invalid, which silently no-op'd requestSubmit() ~50ms later.
+      // Credit: in-browser Claude analysis identified this footgun.
       if (s.form) {
         try {
           if (s.submit && s.form.requestSubmit) s.form.requestSubmit(s.submit);
@@ -882,12 +884,48 @@
         } catch(e) {
           if (s.submit) safeClick(s.submit);
         }
-      } else if (s.submit) {
-        safeClick(s.submit);
+      } else {
+        // Path B: no <form> (React-only login surface). Fire a single
+        // input/change pass through React's native value-setter so the
+        // tracker notices the autofilled value, then click submit.
+        try {
+          var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(pass, pass.value);
+          pass.dispatchEvent(new Event('input', {bubbles:true}));
+          pass.dispatchEvent(new Event('change', {bubbles:true}));
+        } catch(e) {}
+        if (s.submit) safeClick(s.submit);
       }
     } else { safeClick(s.el); }
     return true;
   }
+
+  // Optional opt-in: store a password for fully autonomous login.
+  // SECURITY TRADE-OFF: Tampermonkey storage is NOT OS-encrypted (Chrome's
+  // built-in password manager is). Anyone with access to your browser
+  // profile can extract it. Only enable this if you accept that risk.
+  // Usage in browser DevTools console:
+  //   bcSavePassword('your-password-here')   // store
+  //   bcClearPassword()                      // remove
+  //   bcHasPassword()                        // check (true/false)
+  try {
+    window.bcSavePassword = function(p) {
+      if (typeof p !== 'string' || !p) { console.warn('[BC] usage: bcSavePassword("your-password")'); return false; }
+      GM_setValue('bc_stored_password', p);
+      console.log('[BC] Password stored for autonomous login. Use bcClearPassword() to remove. Length: ' + p.length);
+      return true;
+    };
+    window.bcClearPassword = function() {
+      GM_setValue('bc_stored_password', '');
+      console.log('[BC] Stored password cleared. Reverting to Chrome autofill.');
+      return true;
+    };
+    window.bcHasPassword = function() {
+      var p = '';
+      try { p = GM_getValue('bc_stored_password', '') || ''; } catch(e){}
+      return !!p;
+    };
+  } catch(eExpose) { /* sandboxed page */ }
 
   /* ═══════════════════════════════════════════════════════
      9. STATE MACHINE
