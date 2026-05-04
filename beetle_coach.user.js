@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.14
+// @version      12.4.15
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -28,7 +28,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.14';
+  var VER = '12.4.15';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -864,26 +864,16 @@
     logThrottled('autologin-'+s.screen, 'Auto-login '+s.screen+'/3: '+s.desc, 60000); save();
     if (s.useRobustSubmit) {
       var pass = s.pass;
-      // Touch the field to coax Chrome autofill release.
+      // Just submit. Chrome autofill populates the actual form field —
+      // the JS isolation only blocks scripted .value reads, NOT the
+      // browser's form-submission read. form.requestSubmit() collects
+      // field values internally and POSTs them. Earlier v12.4.13 bail-
+      // on-empty was over-cautious — the spam loop it was guarding
+      // against was actually caused by the focus-event listener (fixed
+      // in v12.4.14), not by empty submissions. If the password is
+      // genuinely wrong, invalidCredsBackoff() catches it on the next
+      // render and pauses for 10 min.
       try { if (pass && typeof pass.focus === 'function') { pass.focus(); pass.blur(); } } catch(eF) {}
-      // BAIL IF EMPTY. Earlier hypothesis (v12.4.11) was that the form
-      // submission would carry Chrome's autofilled value even when JS
-      // can't read it. In practice this is unreliable — when autofill
-      // hasn't populated yet (fresh session, no recent gesture), the
-      // form really is empty and Keycloak responds with "Invalid
-      // username or password", which redirects back to the form and
-      // produces a 15s spam loop. Better to wait for the gesture
-      // listener (v12.4.8) to detect a real user click and retry then.
-      if (!pass || !pass.value) {
-        logThrottled('login-empty',
-          'Login form has no readable password (Chrome autofill needs a real click). ' +
-          'Click anywhere on the page once — gesture listener will auto-submit.',
-          60000);
-        notify('login-empty', 'Manual click needed',
-          'Click anywhere on the Beetle page to release Chrome autofill — script will take over.');
-        _loginAttempts = Math.max(0, _loginAttempts - 1);
-        return false;
-      }
       // Path A: real <form> (Keycloak server-rendered) — submit directly.
       if (s.form) {
         try {
