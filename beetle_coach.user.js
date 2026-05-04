@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.13
+// @version      12.4.14
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -28,7 +28,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.13';
+  var VER = '12.4.14';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -734,7 +734,10 @@
   /* ═══════════════════════════════════════════════════════
      8. LOGIN FLOW
      ═══════════════════════════════════════════════════════ */
-  var _loginAttempts = 0, _lastLoginTime = 0;
+  var _loginAttempts = 0;
+  // S.lastLoginTime is persisted via GM_setValue so the LOGIN_COOLDOWN
+  // (15s) survives the page reloads triggered by failed login submits.
+  // Without persistence, fail→reload→retry storms repeat every 100ms.
   function detectLoginScreen() {
     var url = window.location.href, body = bodyText();
     if (/\/oidc\/.*openid-connect/i.test(url)) {
@@ -761,42 +764,63 @@
     }
     return {screen:0,el:null,desc:'Not a login screen'};
   }
-  // One-time setup: listen for ANY user gesture (mousedown/keydown/touch/
-  // focus). When the user is anywhere near the page — even clicking a
-  // random spot — Chrome releases the autofilled password to JS. The
-  // moment that happens we trigger a login retry instead of waiting up
-  // to 15s for the next poll. Critical for "I walked over and now it
-  // works" UX: any gesture, anywhere, kicks off submission within ~150ms.
+  // One-time setup: listen for real user gestures (mousedown/keydown/
+  // touch ONLY — NOT focus or visibilitychange, which fire on every page
+  // load and would create a submit→reload→focus→submit redirect storm).
+  // When the user makes a real gesture, Chrome releases the autofilled
+  // password to JS within ~100ms. Triggers an immediate login retry.
+  // Heavily debounced so a single mouse click (which fires mousedown +
+  // click + sometimes focus) only runs ONE polling loop, not three.
   function setupAutofillUnlock() {
     if (window.__bcAutofillWatch) return;
     window.__bcAutofillWatch = true;
     var armed = function() {
-      // Give Chrome a moment to commit the autofill value, then poll
+      // Dedup: if a polling loop is already in flight from a recent
+      // gesture, skip. Without this, mousedown+click+focus from a single
+      // physical click each start their own loop and each call
+      // tryAutoLogin, multiplying submissions.
+      if (window.__bcGestureBusy) return;
+      window.__bcGestureBusy = true;
       var done = false;
       var attempts = 0;
       var iv = setInterval(function() {
         attempts++;
-        if (done || attempts > 8) { clearInterval(iv); return; }
+        if (done || attempts > 8) {
+          clearInterval(iv);
+          // Hold the busy flag 2s after polling ends so back-to-back
+          // gesture events from one click don't immediately re-arm.
+          setTimeout(function(){ window.__bcGestureBusy = false; }, 2000);
+          return;
+        }
         var s = detectLoginScreen();
         if (s.screen === 3 && s.pass && s.pass.value) {
-          done = true; clearInterval(iv);
-          logEvent('Gesture detected — autofill released, submitting.');
-          _loginAttempts = 0;       // reset attempt counter
-          _lastLoginTime = 0;       // bypass cooldown
-          tryAutoLogin();
+          done = true;
+          clearInterval(iv);
+          // Respect the cooldown (now persisted in S.lastLoginTime so it
+          // survives page reloads). If we submitted recently, skip —
+          // gesture detection is an optimization, not a license to
+          // bypass throttling. Submitting again every 100ms causes the
+          // redirect storm we just fixed.
+          if (Date.now() - (S.lastLoginTime||0) > LOGIN_COOLDOWN) {
+            logThrottled('gesture-submit', 'Gesture detected — autofill released, submitting.', 30000);
+            _loginAttempts = 0;
+            tryAutoLogin();
+          }
+          setTimeout(function(){ window.__bcGestureBusy = false; }, 2000);
         }
       }, 100);
     };
     document.addEventListener('mousedown', armed, true);
     document.addEventListener('keydown', armed, true);
     document.addEventListener('touchstart', armed, true);
-    window.addEventListener('focus', armed, true);
-    document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') armed(); }, true);
+    // NB: 'focus' and 'visibilitychange' DELIBERATELY excluded — they
+    // fire on every page load/redirect, which would create a submit→
+    // reload→focus→submit infinite loop. Real user gestures only.
   }
 
   function tryAutoLogin() {
     setupAutofillUnlock(); // idempotent — only registers listeners once
-    if (Date.now() - _lastLoginTime < LOGIN_COOLDOWN) return false;
+    if (Date.now() - (S.lastLoginTime||0) < LOGIN_COOLDOWN) return false;
     var s = detectLoginScreen(); if (!s.el) return false;
     // Auth Portal stuck-check MUST run BEFORE the LOGIN_MAX gate so we
     // can still recover even after the budget was burned by earlier
@@ -833,9 +857,9 @@
     // so a stuck portal can still trigger reload even if budget burned.
     // Soft-reset the attempts every 5 min so we never permanently give
     // up — the user might come back and need us to try again.
-    if (Date.now() - _lastLoginTime > 300000) _loginAttempts = 0;
+    if (Date.now() - (S.lastLoginTime||0) > 300000) _loginAttempts = 0;
     if (_loginAttempts >= LOGIN_MAX) { logThrottled('login-max','Auto-login gave up after '+LOGIN_MAX+' attempts. Will retry in 5 min.',120000); return false; }
-    _lastLoginTime = Date.now(); _loginAttempts++;
+    S.lastLoginTime = Date.now(); _loginAttempts++;
     // Throttle per-screen so 4-5 retry lines per minute don't flood the log
     logThrottled('autologin-'+s.screen, 'Auto-login '+s.screen+'/3: '+s.desc, 60000); save();
     if (s.useRobustSubmit) {
