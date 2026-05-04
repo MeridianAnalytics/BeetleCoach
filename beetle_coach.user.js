@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.15
+// @version      12.4.16
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -28,7 +28,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.15';
+  var VER = '12.4.16';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -313,7 +313,7 @@
   function defaults() {
     return { ver:VER, mergedInventory:{}, currentHammer:null, ownedHammers:[], brokenHammers:[], discoveredHammers:[],
       currentHammerBonus:null, currentHammerBreakChance:null, timers:{}, lastFullScan:0, lastPassiveScan:0,
-      autoClaim:true, autoHunt:true, panelOpen:true, level:null, craftMode:null, strategy:'endgame',
+      autoClaim:true, autoHunt:true, paused:false, panelOpen:true, level:null, craftMode:null, strategy:'endgame',
       log:[], machineState:'BOOTING', stateEnteredAt:Date.now(), lastActionAt:0, stuckReloads:0,
       disconnectedSince:0, disconnectReloads:0,
       session:defaultSession() };
@@ -930,6 +930,11 @@
      ═══════════════════════════════════════════════════════ */
   function tick() {
     parseTimers(); refreshTimerDisplay();
+    // Master pause: skip ALL automation but keep the panel + timers
+    // refreshing. Lets the user navigate freely (craft, browse) while
+    // still seeing recipe guidance from the coach. No nav, no scan, no
+    // claim, no hunt, no eject recovery, no PROCESSING reload.
+    if (S.paused) { renderPanel(); return; }
     switch (S.machineState) {
       case 'BOOTING':         return handleBooting();
       case 'LOGGED_OUT':      return handleLoggedOut();
@@ -1171,13 +1176,16 @@
     var fmt = function(v) { return !v ? '\u2014' : /ready/i.test(v) ? '<span class="bc8-badge bc8-ready">Ready</span>' : '<span class="bc8-badge bc8-countdown">'+v+'</span>'; };
     var h = '', cheese = inv.cheese ? inv.cheese.toLocaleString() : '';
     // Header
-    h += '<div class="bc8-header"><span class="bc8-title"><span id="bc8-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach <span style="font-size:10px;color:#6b8a90;font-weight:600;">v'+VER+'</span></span>';
+    h += '<div class="bc8-header"><span class="bc8-title"><span id="bc8-minimize" style="cursor:pointer;">\u{1FAB2}</span> Beetle Coach <span style="font-size:10px;color:#6b8a90;font-weight:600;">v'+VER+'</span>'+(S.paused?' <span style="font-size:11px;color:#fff;background:#f39c12;padding:2px 6px;border-radius:4px;font-weight:800;">PAUSED</span>':'')+'</span>';
     h += '<span class="bc8-sub">'+(S.level?'Lv.'+S.level:'')+(cheese?' \u00B7 '+cheese+' \u{1F9C0}':'');
     h += ' \u00B7 <span id="bc8-fresh" class="bc8-badge '+(isFresh()?'bc8-fresh':'bc8-stale')+'">'+(isFresh()?'OK':'STALE')+'</span>';
     h += ' \u00B7 <span id="bc8-state" class="bc8-state">'+S.machineState+'</span></span></div>';
     // Buttons
     var sl = S.strategy==='endgame'?'Endgame':(S.strategy==='flowers'?'Flowers':'Broad');
-    h += '<div class="bc8-btns"><button class="bc8-btn" id="bc8-fs">Full Scan</button>';
+    h += '<div class="bc8-btns">';
+    if (S.paused) h += '<button class="bc8-btn" id="bc8-pause" style="background:#f39c12;color:#fff;border-color:#d68910;font-weight:800;" title="Resume all automation">▶ Resume</button>';
+    else h += '<button class="bc8-btn" id="bc8-pause" title="Pause all automation (no scan, no claim, no hunt, no nav, no eject recovery) so you can craft manually">⏸ Pause</button>';
+    h += '<button class="bc8-btn" id="bc8-fs">Full Scan</button>';
     h += '<button class="bc8-btn '+(S.autoClaim?'on':'')+'" id="bc8-ac">Claim '+(S.autoClaim?'ON':'OFF')+'</button>';
     h += '<button class="bc8-btn '+(S.autoHunt?'on':'')+'" id="bc8-ah">Hunt '+(S.autoHunt?'ON':'OFF')+'</button>';
     h += '<button class="bc8-btn '+(S.strategy!=='broad'?'on':'')+'" id="bc8-strat">'+sl+'</button>';
@@ -1241,6 +1249,12 @@
     h += '<div class="bc8-scroll" style="max-height:80px;flex:1;"><div class="bc8-h">Log</div><div id="bc8-log">'+S.log.slice().reverse().map(function(l){return '<div class="bc8-log-line">'+l+'</div>';}).join('')+'</div></div>';
     panel.innerHTML = h;
     // Bind
+    document.getElementById('bc8-pause').addEventListener('click',function() {
+      S.paused = !S.paused;
+      save();
+      logEvent(S.paused ? 'Paused — all automation off. Click Resume to re-enable.' : 'Resumed — automation active.');
+      renderPanel();
+    });
     document.getElementById('bc8-fs').addEventListener('click',function() { transition('SCANNING'); fullScan().then(function(){transition('IDLE');}); });
     document.getElementById('bc8-ac').addEventListener('click',function() { S.autoClaim = !S.autoClaim; save(); renderPanel(); });
     document.getElementById('bc8-ah').addEventListener('click',function() { S.autoHunt = !S.autoHunt; save(); renderPanel(); });
