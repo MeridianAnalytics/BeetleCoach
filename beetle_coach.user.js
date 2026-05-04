@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Remilia Beetle Coach
 // @namespace    http://tampermonkey.net/
-// @version      12.4.11
+// @version      12.4.12
 // @description  BeetleBoy coach: state-machine automation, auto-claim/hunt/cheese, auto-login, smart pathways.
 // @match        https://www.remilia.net/*
 // @grant        GM_getValue
@@ -28,7 +28,7 @@
   /* ═══════════════════════════════════════════════════════
      1. CONFIG
      ═══════════════════════════════════════════════════════ */
-  var VER = '12.4.11';
+  var VER = '12.4.12';
   var STORE_KEY = 'beetle_coach_v8_store';
   var PANEL_ID = 'bc8-panel';
   var BTN_ID = 'bc8-toggle';
@@ -836,7 +836,8 @@
     if (Date.now() - _lastLoginTime > 300000) _loginAttempts = 0;
     if (_loginAttempts >= LOGIN_MAX) { logThrottled('login-max','Auto-login gave up after '+LOGIN_MAX+' attempts. Will retry in 5 min.',120000); return false; }
     _lastLoginTime = Date.now(); _loginAttempts++;
-    logEvent('Auto-login '+s.screen+'/3: '+s.desc); save();
+    // Throttle per-screen so 4-5 retry lines per minute don't flood the log
+    logThrottled('autologin-'+s.screen, 'Auto-login '+s.screen+'/3: '+s.desc, 60000); save();
     if (s.useRobustSubmit) {
       var pass = s.pass;
       // Don't gate on pass.value. Chrome's autofill DOES commit the real
@@ -955,9 +956,9 @@
       if (!S.disconnectedSince) { S.disconnectedSince = Date.now(); save(); }
       var disconnDur = Date.now() - S.disconnectedSince;
       if (loadCartridge()) {
-        logThrottled('cart-load','Cartridge ejected; pulling LOAD lever ('+Math.round(disconnDur/1000)+'s).',30000);
+        logThrottled('cart-load','Cartridge ejected; pulling LOAD lever ('+Math.round(disconnDur/1000)+'s).',120000);
       } else {
-        logThrottled('cart-load-fail','Cartridge ejected but LOAD lever not found in beetle-catch-module.',30000);
+        logThrottled('cart-load-fail','Cartridge ejected but LOAD lever not found in beetle-catch-module.',120000);
       }
       // Stuck >5 min: dump the bar class list every 5 min so we can see
       // whether React is updating state (click reaching handler) or the
@@ -1155,6 +1156,7 @@
     h += '<button class="bc8-btn '+(S.autoClaim?'on':'')+'" id="bc8-ac">Claim '+(S.autoClaim?'ON':'OFF')+'</button>';
     h += '<button class="bc8-btn '+(S.autoHunt?'on':'')+'" id="bc8-ah">Hunt '+(S.autoHunt?'ON':'OFF')+'</button>';
     h += '<button class="bc8-btn '+(S.strategy!=='broad'?'on':'')+'" id="bc8-strat">'+sl+'</button>';
+    h += '<button class="bc8-btn" id="bc8-rss" title="Reset session counters and gain log; leave inventory/settings alone">Reset Session</button>';
     h += '<button class="bc8-btn" id="bc8-rst" style="color:#c0392b;border-color:#e6b0aa;">Reset</button></div>';
     // Status strip
     h += '<div class="bc8-strip">';
@@ -1218,6 +1220,7 @@
     document.getElementById('bc8-ac').addEventListener('click',function() { S.autoClaim = !S.autoClaim; save(); renderPanel(); });
     document.getElementById('bc8-ah').addEventListener('click',function() { S.autoHunt = !S.autoHunt; save(); renderPanel(); });
     document.getElementById('bc8-strat').addEventListener('click',function() { var m = ['endgame','broad','flowers']; S.strategy = m[(m.indexOf(S.strategy)+1)%m.length]; save(); renderPanel(); });
+    document.getElementById('bc8-rss').addEventListener('click',function() { S.session = defaultSession(); save(); renderPanel(); logEvent('Session reset.'); });
     document.getElementById('bc8-rst').addEventListener('click',function() { if (confirm('Clear all data?')) { S = defaults(); save(); renderPanel(); fullScan(); } });
     document.getElementById('bc8-minimize').addEventListener('click',function(e) { e.stopPropagation(); var p = document.getElementById(PANEL_ID); if (p) { p.classList.add('hidden'); S.panelOpen = false; save(); } });
     var hdr = document.querySelector('.bc8-header'); if (hdr) hdr.addEventListener('mousedown',function(e) { if (e.target.id==='bc8-minimize') return; var p = document.getElementById(PANEL_ID); if (!p) return; _drag.on=true; _drag.ox=e.clientX-p.offsetLeft; _drag.oy=e.clientY-p.offsetTop; e.preventDefault(); });
